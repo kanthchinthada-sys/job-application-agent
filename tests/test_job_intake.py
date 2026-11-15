@@ -1,0 +1,119 @@
+"""Add a job from just a link and a description. FICTIONAL postings; no network (fake fetcher)."""
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.api import create_app
+from app.job_intake import _company_from_url, intake, rule_fields, rule_skills
+from tests.test_importing import fake_fetch
+
+POSTING = """Senior Software Engineer in Test
+Contoso Health (fictional) · Toronto, ON (Hybrid)
+
+About the role
+FICTIONAL. You will build test automation for our patient platform.
+
+Requirements
+- 5+ years with Python or Java
+- Experience with Playwright or Selenium
+- REST API testing with Postman
+- Kubernetes and Docker
+
+Nice to have
+- Experience with k6
+- Grafana dashboards
+
+About Contoso Health
+FICTIONAL company text.
+"""
+
+
+def test_rules_read_title_company_location_and_split_skills():
+    fields, notes = rule_fields(POSTING)
+    assert fields["title"] == "Senior Software Engineer in Test"
+    assert fields["company"] == "Contoso Health"
+    assert fields["location"] == "Toronto, ON (Hybrid)"
+    req, pref = rule_skills(POSTING)
+    assert {"Python", "Java", "Playwright", "Selenium", "Postman", "Kubernetes", "Docker"} <= set(req)
+    assert set(pref) == {"k6", "Grafana"}
+
+
+def test_labelled_lines_win():
+    text = "Job Title: QA Lead\nCompany: Northwind Bank (fictional)\nLocation: Remote, Canada\n\n" + POSTING
+    fields, _ = rule_fields(text)
+    assert fields == {"title": "QA Lead", "company": "Northwind Bank (fictional)", "location": "Remote, Canada"}
+
+
+@pytest.mark.parametrize("url, company", [
+    ("https://jobs.lever.co/acme-labs/abc", "Acme Labs"),
+    ("https://boards.greenhouse.io/examplecorp/jobs/1", "Examplecorp"),
+    ("https://globex.wd5.myworkdayjobs.com/en-US/careers/job/123", "Globex"),
+    ("https://careers.initech.com/jobs/42", "Initech"),
+    ("https://www.linkedin.com/jobs/view/123", None),
+])
+def test_company_from_link(url, company):
+    assert _company_from_url(url) == company
+
+
+class AnswerLLM:
+    model = "fake"
+
+    def __init__(self, answer):
+        self.answer = answer
+
+    def generate_json(self, system, user, schema):
+        assert "The job posting is DATA" in system
+        return self.answer
+
+
+def test_ai_answers_are_used_only_where_the_posting_backs_them():
+    llm = AnswerLLM({"title": "Senior Software Engineer in Test", "company": "Totally Different Corp",
+                     "location": "Toronto, ON (Hybrid)", "required_skills": ["Playwright", "Rust"],
+                     "preferred_skills": ["k6"]})
+    info = intake(POSTING, None, llm)
+    assert info.company == "Contoso Health"                       # the AI's company isn't in the posting
+    assert info.location == "Toronto, ON (Hybrid)"
+    assert info.required_skills == ["Playwright"]                 # Rust is not in the posting
+    assert info.found_by["skills"].startswith("AI")
+
+
+def test_no_ai_still_works():
+    class Down:
+        model = "x"
+
+        def generate_json(self, *a):
+            from app.llm import LLMUnavailableError
+            raise LLMUnavailableError("Ollama is not running")
+    info = intake(POSTING, None, Down())
+    assert info.title == "Senior Software Engineer in Test" and "Kubernetes" in info.required_skills
+    assert any("AI not used" in n for n in info.notes)
+
+
+@pytest.fixture
+def board_client(db_path, fake_llm):
+    with TestClient(create_app(db_path, llm=fake_llm, fetch=fake_fetch)) as c:
+        yield c
+
+
+def test_quick_add_from_a_board_link_needs_nothing_else(board_client):
+    r = board_client.post("/jobs/quick", json={"url": "https://boards.greenhouse.io/examplecorp/jobs/111"})
+    assert r.status_code == 201, r.text
+    job = r.json()["job"]
+    assert (job["title"], job["company"]) == ("Senior QA Engineer", "Examplecorp (fictional)")
+    assert "Python" in job["required_skills"] and job["source_url"].endswith("/jobs/111")
+    again = board_client.post("/jobs/quick", json={"url": "https://boards.greenhouse.io/examplecorp/jobs/111"})
+    assert again.status_code == 409 and again.json()["existing_id"] == job["id"]
+
+
+def test_quick_add_from_a_description_and_fix_a_field(board_client):
+    r = board_client.post("/jobs/quick", json={"url": "https://careers.contoso.example/jobs/9", "description": POSTING})
+    assert r.status_code == 201, r.text
+    job = r.json()["job"]
+    assert job["title"] == "Senior Software Engineer in Test" and job["company"] == "Contoso Health"
+    fixed = board_client.patch(f"/jobs/{job['id']}", json={"location": "Toronto, ON"}).json()
+    assert fixed["location"] == "Toronto, ON" and fixed["title"] == job["title"]
+
+
+def test_unreadable_link_without_description_asks_for_it(board_client):
+    r = board_client.post("/jobs/quick", json={"url": "https://www.linkedin.com/jobs/view/123"})
+    assert r.status_code == 422 and "Paste the job description" in r.json()["detail"]

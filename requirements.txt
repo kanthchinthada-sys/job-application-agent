@@ -1,0 +1,7 @@
+# Everything for development: the app plus test tools.
+-r requirements-app.txt
+pytest==9.2.0
+
+# End-to-end browser tests (optional): then run  python -m playwright install chromium
+playwright==1.63.0
+python-multipart==0.0.32   # lets the fake Greenhouse form in the browser tests read uploads

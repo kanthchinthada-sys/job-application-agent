@@ -1,0 +1,32 @@
+{
+  "note": "FICTIONAL evaluation cases. Each job lists the skills a careful human reader would extract (gold).",
+  "jobs": [
+    {
+      "id": "sdet-fintech",
+      "title": "Senior SDET (FICTIONAL)",
+      "company": "Maple Ledger Inc. (fictional)",
+      "location": "Toronto, ON (Hybrid)",
+      "description": "FICTIONAL posting. Maple Ledger is hiring a Senior SDET to own test automation for our payments platform. What you'll do: design and maintain API test suites in Java with REST Assured and JUnit 5; build UI regression tests with Playwright; run suites in Jenkins pipelines and keep them stable; review pull requests for testability; mentor two junior QA engineers. Requirements: 5+ years in test automation, strong Java, REST API testing, SQL for data checks, experience with CI/CD (Jenkins or GitHub Actions). Nice to have: Kafka, k6 performance testing, AWS.",
+      "gold_required": ["Java", "REST Assured", "JUnit 5", "Playwright", "Jenkins", "REST API testing", "SQL", "CI/CD", "Test automation"],
+      "gold_preferred": ["Kafka", "k6", "AWS"]
+    },
+    {
+      "id": "qa-lead-health",
+      "title": "QA Lead (FICTIONAL)",
+      "company": "Northshore Health Systems (fictional)",
+      "location": "Remote (Canada)",
+      "description": "FICTIONAL posting. We need a QA Lead for our clinical scheduling product. Responsibilities: define the test strategy and test plans for each release; lead a team of four testers; coordinate UAT with clinic staff; run defect triage with developers and product managers; report release readiness to stakeholders. Requirements: 7+ years in QA with 2+ years leading testers, experience with Jira and test case management, API testing with Postman, Selenium automation, strong communication. Preferred: healthcare domain experience, Azure DevOps, accessibility testing (WCAG).",
+      "gold_required": ["Test strategy", "Test plans", "UAT", "Defect triage", "Jira", "Test case management", "API testing", "Postman", "Selenium", "Communication"],
+      "gold_preferred": ["Healthcare", "Azure DevOps", "Accessibility testing", "WCAG"]
+    },
+    {
+      "id": "fde-ai",
+      "title": "Forward Deployed Engineer (FICTIONAL)",
+      "company": "Lumen Agents Ltd. (fictional)",
+      "location": "Toronto, ON or Remote (Canada)",
+      "description": "FICTIONAL posting. As a Forward Deployed Engineer you will embed with enterprise customers to deploy our AI agent platform. You will write Python integrations against customer REST APIs, debug production issues using logs and traces, run Docker and Kubernetes deployments, and turn customer feedback into product requirements. Requirements: 3+ years writing Python, REST APIs, Docker, Kubernetes, SQL, excellent customer communication. Bonus: experience evaluating LLM outputs, TypeScript, Terraform.",
+      "gold_required": ["Python", "REST APIs", "Docker", "Kubernetes", "SQL", "Customer communication", "Debugging"],
+      "gold_preferred": ["LLM evaluation", "TypeScript", "Terraform"]
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+import { Component, computed, inject, OnInit, signal } from '@angular/core';
+import { FormsModule } from '@angular/forms';
+
+import { Api, ApiError } from '../api';
+import { BankImportReport, BankRecord, RecordStatus } from '../models';
+import { Msg, MsgBox } from '../ui';
+
+const STATUS_LABEL: Record<RecordStatus, string> = {
+  verified: 'verified (used on resumes)', partly_true: 'partly true (not used)',
+  unverified: 'unverified (not used)', not_true: 'not true (not used)',
+};
+
+/** The numbered experience bank: paste it, see where each record went, and confirm or exclude records. */
+@Component({
+  selector: 'app-bank-panel',
+  imports: [FormsModule, MsgBox],
+  template: `
+    <div class="card" data-testid="bank">
+      <h2>Experience bank</h2>
+      <p class="hint">Optional, for the best resumes: a longer list of everything you've done, one numbered record per
+        line (e.g. "AB01: Built …"), under each employer's name as a heading. Every job then gets the records that fit it
+        best. Records are yours, so they count as <b>verified</b>; add "(unverified)", "(partly true)" or "(not true)" to a
+        line to keep it off your resumes. Duplicates are removed and notes are kept as context.</p>
+      <textarea aria-label="Experience bank text" [(ngModel)]="text" placeholder="Northwind Bank | Toronto
+AB01: Built …
+AB02: Led …"></textarea>
+      <button class="primary" type="button" [disabled]="busy()" (click)="importText()">Import records</button>
+      <app-msg [msg]="msg()" />
+
+      @if (report(); as r) {
+        <div class="panel small" data-testid="bank-report">
+          <b>{{ r.imported }} records imported.</b>
+          @for (o of owners(r); track o[0]) { <span class="label">{{ o[0] }}: {{ o[1] }}</span> }
+          @if (r.duplicates_removed.length) { <div>Duplicates removed: {{ r.duplicates_removed.join(', ') }}</div> }
+          @if (r.rerouted.length) { <div>Moved to the right place: {{ r.rerouted.join('; ') }}</div> }
+          @if (r.missing_ids.length) { <div>Missing from your bank (not filled in): {{ r.missing_ids.join(', ') }}</div> }
+          @if (r.notes_kept_as_caveats.length) { <div>Notes kept as context for: {{ r.notes_kept_as_caveats.join(', ') }}</div> }
+        </div>
+      }
+
+      @if (records().length) {
+        <div class="row" style="margin-top:12px">
+          <label class="inline">Show
+            <select aria-label="Filter records" [(ngModel)]="filter" style="width:auto">
+              <option value="all">all ({{ records().length }})</option>
+              @for (s of statuses; track s) { <option [value]="s">{{ s.replace('_', ' ') }} ({{ count(s) }})</option> }
+            </select>
+          </label>
+        </div>
+        <table class="small">
+          <thead><tr><th>ID</th><th>Record</th><th>Status</th></tr></thead>
+          <tbody>
+            @for (r of shown(); track r.id) {
+              <tr [class.needs-you]="r.status !== 'verified'">
+                <td><b>{{ r.id }}</b><div class="muted">{{ r.owner }}</div></td>
+                <td>{{ r.text }}
+                  @if (r.caveat) { <div class="muted">Context kept: {{ r.caveat }}</div> }
+                  @if (r.status_note) { <div class="muted">{{ r.status_note }}</div> }</td>
+                <td>
+                  <select [attr.aria-label]="'Status of ' + r.id" [value]="r.status" (change)="setStatus(r, $any($event.target).value)">
+                    @for (s of statuses; track s) { <option [value]="s" [selected]="s === r.status">{{ label(s) }}</option> }
+                  </select>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      }
+    </div>
+  `,
+})
+export class BankPanel implements OnInit {
+  private api = inject(Api);
+
+  protected readonly statuses: RecordStatus[] = ['verified', 'partly_true', 'unverified', 'not_true'];
+  protected readonly text = signal('');
+  protected readonly busy = signal(false);
+  protected readonly msg = signal<Msg | null>(null);
+  protected readonly report = signal<BankImportReport | null>(null);
+  protected readonly records = signal<BankRecord[]>([]);
+  protected readonly filter = signal<string>('all');
+  protected readonly shown = computed(() =>
+    this.filter() === 'all' ? this.records() : this.records().filter(r => r.status === this.filter()));
+
+  async ngOnInit() {
+    try {
+      const p = await this.api.profile() as { experience_bank?: BankRecord[] };
+      this.records.set(p.experience_bank ?? []);
+    } catch { /* no profile yet */ }
+  }
+
+  async importText() {
+    if (!this.text().trim()) { this.msg.set({ kind: 'bad', text: 'Paste your records first.' }); return; }
+    this.busy.set(true);
+    try {
+      const r = await this.api.importBank(this.text());
+      this.report.set(r.report);
+      this.records.set(r.records);
+      this.msg.set({ kind: 'ok', text: 'Imported. Check the records that are not verified below.' });
+    } catch (e) {
+      const err = e as ApiError;
+      this.msg.set({ kind: 'bad', text: err.status === 404 ? 'Save your profile first, then import the bank.' : err.message });
+    } finally {
+      this.busy.set(false);
+    }
+  }
+
+  async setStatus(r: BankRecord, status: RecordStatus) {
+    try {
+      const saved = await this.api.setRecordStatus(r.id, status, status === 'verified' ? 'Confirmed by you.' : r.status_note);
+      this.records.update(list => list.map(x => (x.id === saved.id ? saved : x)));
+    } catch (e) {
+      this.msg.set({ kind: 'bad', text: (e as ApiError).message });
+    }
+  }
+
+  protected count(s: string) { return this.records().filter(r => r.status === s).length; }
+  protected label(s: RecordStatus) { return STATUS_LABEL[s]; }
+  protected owners(r: BankImportReport) { return Object.entries(r.by_owner); }
+}

@@ -1,0 +1,46 @@
+{
+  "full_name": "Jordan Sample (FICTIONAL TEST DATA)",
+  "headline": "QA Engineer moving toward forward deployed engineering",
+  "summary": "FICTIONAL profile for development only. QA engineer who builds API test automation in Python and works closely with customers on release readiness.",
+  "contact": {
+    "email": "jordan.sample@example.com",
+    "location": "Exampleville, CA",
+    "links": ["https://example.com/jordan-sample"]
+  },
+  "skills": ["Python", "pytest", "SQL", "REST APIs", "Test Automation", "Git"],
+  "experience": [
+    {
+      "company": "Example Corp (fictional)",
+      "title": "Senior QA Engineer",
+      "start_date": "2021-03",
+      "end_date": null,
+      "highlights": [
+        "Built a pytest suite for a payments API used by three internal teams.",
+        "Worked with customer support to reproduce production issues using Docker containers."
+      ],
+      "skills": ["Python", "pytest", "Postgres", "Jenkins"]
+    },
+    {
+      "company": "Sample Systems (fictional)",
+      "title": "QA Analyst",
+      "start_date": "2018-06",
+      "end_date": "2021-02",
+      "highlights": ["Wrote manual and automated regression tests for a web application."],
+      "skills": ["Selenium", "JIRA"]
+    }
+  ],
+  "projects": [
+    {
+      "name": "Job Application Agent",
+      "description": "FastAPI backend that tracks job applications and compares skills.",
+      "skills": ["FastAPI", "SQLite"]
+    }
+  ],
+  "achievements": ["FICTIONAL: Example achievement placeholder."],
+  "preferences": {
+    "target_roles": ["Forward Deployed Engineer", "Solutions Engineer"],
+    "locations": ["Remote"],
+    "remote_preference": "remote",
+    "employment_types": ["full-time"]
+  }
+}

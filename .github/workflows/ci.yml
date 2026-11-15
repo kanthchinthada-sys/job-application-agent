@@ -1,0 +1,82 @@
+# Runs every test on each push and pull request. Free GitHub-hosted runners; no secrets, no deployments.
+# The tests use temporary databases, a fake AI model and fake job boards, so no Ollama or network access is needed.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    name: API and unit tests (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python scripts/check_personal_data.py        # no real emails / phone numbers in the published code
+      - run: python -m pytest --junitxml=reports/pytest.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-report
+          path: reports/
+
+  angular:
+    name: Angular unit tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npx ng test --watch=false
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: angular-build
+          path: frontend/dist/frontend/browser
+          retention-days: 3
+
+  browser:
+    name: Browser tests (Playwright)
+    needs: angular
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      - uses: actions/download-artifact@v4          # so the Angular-screen tests run too
+        with:
+          name: angular-build
+          path: frontend/dist/frontend/browser
+      - run: python -m pytest -m e2e --junitxml=reports/e2e.xml
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-report
+          path: reports/

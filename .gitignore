@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Local data: your real profile and applications live here. Never commit.
+data/
+*.db
+*.sqlite3
+
+# Secrets: passwords and settings
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+
+# Your own files that are not part of the app (notes, plans, machine setup). Never commit.
+private/
+work/
+outputs/

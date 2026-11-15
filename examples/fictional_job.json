@@ -1,0 +1,9 @@
+{
+  "title": "Forward Deployed Engineer (FICTIONAL)",
+  "company": "Imaginary AI Inc. (fictional)",
+  "location": "Remote (US)",
+  "source_url": "https://jobs.example.com/imaginary-ai/fde-123",
+  "description": "FICTIONAL posting for development. You will deploy our platform with customers, write Python integrations against REST APIs, debug data issues in PostgreSQL, and package services with Docker on AWS.",
+  "required_skills": ["Python", "REST APIs", "PostgreSQL", "Docker", "AWS", "Customer communication"],
+  "preferred_skills": ["TypeScript", "pytest", "Kubernetes"]
+}

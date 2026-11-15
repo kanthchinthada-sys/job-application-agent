@@ -1,0 +1,5 @@
+# What the app itself needs to run (used by the Docker image).
+fastapi==0.162.7
+uvicorn==0.54.0
+httpx==0.28.1
+pypdf==6.17.0      # reads PDF resumes on the Profile page (Word and text files need nothing extra)

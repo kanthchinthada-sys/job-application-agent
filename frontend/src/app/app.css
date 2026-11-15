@@ -1,0 +1,7 @@
+header { background: var(--card); border-bottom: 1px solid var(--line); padding: 14px 24px; display: flex; align-items: center; gap: 24px; }
+h1 { font-size: 17px; margin: 0; }
+nav a { padding: 8px 12px; border-radius: 8px; color: var(--muted); text-decoration: none; }
+nav a.active { background: #eef2ff; color: var(--accent); font-weight: 600; }
+.ai { margin-left: auto; font-size: 13px; color: var(--muted); }
+header button { margin: 0; }
+main { max-width: 960px; margin: 24px auto; padding: 0 24px; }
