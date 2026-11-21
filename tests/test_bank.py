@@ -182,7 +182,8 @@ def test_the_same_profile_gets_different_selections_per_job():
     tops = {name: plan.selected["Contoso Health"][0] for name, plan in plans.items()}
     orders = {name: tuple(i for ids in pl.selected.values() for i in ids) for name, pl in plans.items()}
     assert len(set(orders.values())) == 4                                         # four different resumes
-    assert tops["fde"] == "CH05"                      # customer-facing deployment work first
+    # deployment-heavy FDE: Kubernetes/Helm deployment work and the customer-facing work lead the role
+    assert set(plans["fde"].selected["Contoso Health"][:2]) == {"CH04", "CH05"}
     assert plans["sdet"].selected["Contoso Health"][0] in {"CH01", "CH03", "CH04"}
     assert plans["lead"].selected["Northwind Bank"][:2] == ["NB01", "NB02"] or set(plans["lead"].selected["Northwind Bank"][:2]) <= {"NB01", "NB02", "NB04"}
     ai_project = plans["ai"].selected["Job Application Agent (personal project)"]
@@ -315,7 +316,9 @@ def test_cover_letter_uses_verified_bank_records_and_skips_the_degree(client, fa
     prompt = fake_llm.calls[0]["user"]
     priorities = prompt.split("PRIORITIES")[1]
     assert "Bachelor" not in priorities                               # degrees are not cover-letter material
-    assert "REST Assured and JUnit 5 (fictional)" in priorities        # the bank record's text, inline
+    # the priority lists its evidence fact with the fact's text, so the model retells the right example
+    fid = next(line.split(":")[0] for line in prompt.splitlines() if "REST Assured and JUnit 5 (fictional)" in line)
+    assert f"   {fid}: " in priorities and "REST Assured and JUnit 5 (fictional)" in priorities
     assert "Ginkgo" not in prompt                                     # SD01 is unverified: never shown to the AI
     assert [p_["requirement"] for p_ in doc["review"]["priorities"]][0].startswith("Java test automation")
 

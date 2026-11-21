@@ -61,25 +61,16 @@ def browser_line_measure(html: str, items: list[dict]) -> dict | None:
     """{key: (lines, worst extra px per space)} for each item, laid out like the printed resume. None: no browser."""
     if os.environ.get("JOB_AGENT_PAGE_MEASURE", "auto") == "off" or not items:
         return None
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_measure_now, html, items).result(timeout=120)
+    from app import browser as chromium
 
-
-def _measure_now(html: str, items: list[dict]) -> dict | None:
+    def measure(b):
+        page = chromium.print_page(b, html)
+        try:
+            return page.evaluate(_MEASURE_JS, items)
+        finally:
+            page.close()
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return None
-    try:
-        with sync_playwright() as pw:
-            exe = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
-            browser = pw.chromium.launch(**({"executable_path": exe} if exe else {}))
-            page = browser.new_page(viewport={"width": 816, "height": 1056})   # US Letter at 96 dpi
-            page.set_content(html)
-            page.emulate_media(media="print")
-            out = page.evaluate(_MEASURE_JS, items)
-            browser.close()
+        out = chromium.run(measure, timeout=120)      # the same Chromium as the page fitting
         return {k: (int(v[0]), float(v[1])) for k, v in out.items()}
     except Exception:
         return None

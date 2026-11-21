@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 from app import drafting, repository, resume_render, tailoring
 from app.errors import ConflictError
 from app.dependencies import get_connection
+from app.preparation import Preparation
 from app.schemas import DocumentEdit, DocumentOut, DraftRequest
 
 router = APIRouter(tags=["materials"])
@@ -27,17 +28,41 @@ def create_draft(application_id: Id, body: DraftRequest, request: Request, conn:
     Saved as a new version. Read `review.warnings` and `review.questions_for_you` before using it.
     Takes roughly 20-120 seconds on a laptop. Resumes are opened with GET /documents/{id}/print.
     """
+    return make_draft(conn, request.app.state.llm, application_id, body.kind, body.question)
+
+
+def make_draft(conn, llm, application_id: int, kind: str, question: str = "", plan=None, job=None,
+               legacy: bool = False) -> DocumentOut:
+    """Draft one document and save it as a new version (used by the endpoint and by background preparation)."""
+    from app import metrics
+    with metrics.collect():                    # joins a preparation's run when there is one
+        return _make_draft(conn, llm, application_id, kind, question, plan, job, legacy)
+
+
+def _make_draft(conn, llm, application_id: int, kind: str, question: str = "", plan=None, job=None,
+                legacy: bool = False) -> DocumentOut:
     app = repository.get_application(conn, application_id)
-    job = repository.get_job(conn, app.job_id)
+    job = job or repository.get_job(conn, app.job_id)
     profile = repository.get_profile(conn)
-    llm = request.app.state.llm
-    if body.kind == "resume":
-        content, review = tailoring.tailor(llm, profile, job)
+    if kind == "resume":
+        content, review = tailoring.tailor(llm, profile, job, plan=plan)
         return repository.add_document(conn, application_id, "resume", "", content, "ai", llm.model, review)
-    text, draft_review = drafting.draft(llm, profile, job, body.kind, body.question)
-    return repository.add_document(
-        conn, application_id, body.kind, body.question, text, "ai", llm.model, draft_review.model_dump()
-    )
+    text, draft_review = drafting.draft(llm, profile, job, kind, question, plan=plan, legacy=legacy)
+    return repository.add_document(conn, application_id, kind, question, text, "ai", llm.model, draft_review.model_dump())
+
+
+@router.post("/applications/{application_id}/prepare", response_model=Preparation, status_code=202,
+             responses={404: {"description": "Application not found"}})
+def start_preparation(application_id: Id, request: Request, conn: Conn):
+    """Make the tailored resume and the cover letter in the background. Check progress with GET."""
+    repository.get_application(conn, application_id)
+    return request.app.state.preparer.start(application_id)
+
+
+@router.get("/applications/{application_id}/prepare", response_model=Preparation)
+def preparation_status(application_id: Id, request: Request):
+    """How far the background preparation got: idle, queued, running (with the step), done or failed."""
+    return request.app.state.preparer.get(application_id)
 
 
 @router.get("/applications/{application_id}/documents", response_model=list[DocumentOut])

@@ -1,9 +1,9 @@
 import { DatePipe } from '@angular/common';
-import { Component, computed, effect, inject, input, output, signal, untracked } from '@angular/core';
+import { Component, computed, DestroyRef, effect, inject, input, output, signal, untracked } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
 import { Api, ApiError } from '../api';
-import { Application, Doc } from '../models';
+import { Application, Doc, Job, Preparation } from '../models';
 import { Msg, MsgBox } from '../ui';
 import { ApplyPlan } from './apply-plan';
 import { HandoffPanel } from './handoff-panel';
@@ -17,8 +17,30 @@ import { ResumeCard } from './resume-card';
     <div class="card" data-testid="materials">
       <h2>Materials · {{ application().job_title }} at {{ application().company }}</h2>
       <p class="hint">Drafted by your local AI from your profile only. Always read the checks before using a draft.</p>
-      <button class="primary" type="button" [disabled]="busy()" (click)="draft({ kind: 'cover_letter' })">Draft cover letter</button>
-      <button class="primary" type="button" [disabled]="busy()" (click)="draft({ kind: 'resume' })">Tailor resume</button>
+      @if (excerpt(); as j) {
+        <div class="panel" data-testid="excerpt">
+          <b>Only a short excerpt of this posting is saved</b> ({{ j.description.length }} characters), so the skill
+          match, ATS check and tailoring can't see the real requirements.
+          @if (j.source_url) {
+            <div><button class="primary" type="button" [disabled]="refreshing()" (click)="refresh(j)">
+              {{ refreshing() ? 'Reading the posting…' : 'Get the full posting' }}</button></div>
+            <div class="small muted">If that doesn't work: <a [href]="j.source_url" target="_blank" rel="noopener">open the posting</a>,
+              copy its full description and paste it here:</div>
+          } @else { Paste its full description here: }
+          <textarea aria-label="Full job description" [(ngModel)]="fullDescription" placeholder="Paste the full job description"></textarea>
+          <button class="secondary" type="button" [disabled]="fullDescription().trim().length < 200" (click)="saveDescription(j)">Save description</button>
+        </div>
+      }
+      @if (prep(); as p) {
+        @if (p.state === 'queued' || p.state === 'running') {
+          <div class="msg info" data-testid="preparing">⏳ {{ p.message }} This continues in the background: you can
+            leave this page and come back. ({{ p.done_steps.length }} of 2 done)</div>
+        } @else if (p.state === 'failed') {
+          <div class="msg bad" data-testid="preparing">{{ p.message }}</div>
+        }
+      }
+      <button class="primary" type="button" [disabled]="busy() || preparing()" (click)="draft({ kind: 'cover_letter' })">Draft cover letter</button>
+      <button class="primary" type="button" [disabled]="busy() || preparing()" (click)="draft({ kind: 'resume' })">Tailor resume</button>
       <label for="sq">Screening question</label>
       <div class="row">
         <input id="sq" class="wide" [(ngModel)]="question" placeholder="e.g. Are you legally eligible to work in Canada?">
@@ -36,12 +58,19 @@ import { ResumeCard } from './resume-card';
       @for (versions of groups(); track versions[0].id) {
         @let d = versions[0];
         @if (d.kind === 'resume') {
-          <app-resume-card [versions]="versions" />
+          <app-resume-card [versions]="versions" [working]="busy() || preparing()" (regenerate)="draft({ kind: 'resume' })" />
         } @else {
           <div class="block" [attr.data-testid]="'doc-' + d.kind">
             <h3>{{ d.kind === 'cover_letter' ? 'Cover letter' : 'Screening: “' + d.question + '”' }}
               <span class="label">v{{ d.version }} · {{ d.source === 'ai' ? 'AI draft' : 'your edit' }}</span></h3>
             @for (w of d.review?.warnings ?? []; track $index) { <div class="msg bad">⚠ {{ w }}</div> }
+            @if (d.review?.removed?.length) {
+              <details class="small muted" data-testid="letter-removed"><summary>Left out of the letter
+                ({{ d.review.removed.length }}): the AI wrote it, your profile doesn't back it</summary>
+                @for (x of d.review.removed; track $index) { <div>"{{ x }}"</div> }
+                <div>If one of these is true, add it to your profile and generate the letter again.</div>
+              </details>
+            }
             @if (d.review?.questions_for_you?.length) {
               <div class="msg info">The AI needs from you:@for (q of d.review.questions_for_you; track $index) {
 • {{ q }}}</div>
@@ -102,6 +131,13 @@ export class MaterialsPanel {
   protected readonly edits = new Map<number, string>();
 
   private readonly appId = computed(() => this.application().id);
+  /** The job, when only a short excerpt of its posting is saved (e.g. found through Adzuna). */
+  protected readonly excerpt = signal<Job | null>(null);
+  protected readonly fullDescription = signal('');
+  /** Background preparation (resume + cover letter started by Apply on Find jobs). */
+  protected readonly prep = signal<Preparation | null>(null);
+  protected readonly preparing = computed(() => ['queued', 'running'].includes(this.prep()?.state ?? ''));
+  private timer: ReturnType<typeof setTimeout> | null = null;
 
   /** Versions grouped per document (newest first), the plan excluded. */
   protected readonly groups = computed(() => {
@@ -119,9 +155,72 @@ export class MaterialsPanel {
       const id = this.appId();          // only when a different application is opened, not on every reload
       untracked(() => {
         this.msg.set(null); this.showHandoff.set(false); this.edits.clear();
+        this.prep.set(null); this.excerpt.set(null); this.fullDescription.set('');
         this.loadDocs(id);
+        this.checkExcerpt(this.application().job_id);
+        this.watchPreparation(id);
       });
     });
+    inject(DestroyRef).onDestroy(() => this.stopWatching());
+  }
+
+  private async checkExcerpt(jobId: number) {
+    try {
+      const j = await this.api.job(jobId);
+      const placeholder = j.required_skills.length === 1 && [j.title, 'Untitled job'].includes(j.required_skills[0]);
+      if (j.description.length < 800 || j.description.trimEnd().endsWith('…') || placeholder) this.excerpt.set(j);
+    } catch { /* the job list shows any problem */ }
+  }
+
+  protected readonly refreshing = signal(false);
+
+  async refresh(j: Job) {
+    this.refreshing.set(true);
+    try {
+      const updated = await this.api.refreshJob(j.id);
+      this.excerpt.set(null);
+      this.msg.set({ kind: 'ok', text: `Full posting read (${updated.description.length} characters): `
+        + `${updated.required_skills.length} required and ${updated.preferred_skills.length} preferred skills. `
+        + 'Now click "Tailor resume" (and "Draft cover letter") to use them.' });
+    } catch (e) {
+      this.msg.set({ kind: 'bad', text: (e as ApiError).message });
+    } finally {
+      this.refreshing.set(false);
+    }
+  }
+
+  async saveDescription(j: Job) {
+    try {
+      const updated = await this.api.updateJob(j.id, { description: this.fullDescription().trim() });
+      this.excerpt.set(null);
+      this.msg.set({ kind: 'ok', text: `Saved. ${updated.required_skills.length} required and ${updated.preferred_skills.length} `
+        + 'preferred skills read from it. Now click "Tailor resume" (and "Draft cover letter") to use them.' });
+    } catch (e) {
+      this.msg.set({ kind: 'bad', text: (e as ApiError).message });
+    }
+  }
+
+  private stopWatching() {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  /** Follow a background preparation until it is done, showing each document as soon as it is saved. */
+  private async watchPreparation(id: number) {
+    this.stopWatching();
+    let p: Preparation;
+    try {
+      p = await this.api.preparation(id);
+    } catch {
+      return;                                      // older server or no such application: nothing to show
+    }
+    if (id !== this.appId()) return;              // another application was opened meanwhile
+    const before = this.prep()?.done_steps.length ?? 0;
+    this.prep.set(p);
+    if (p.done_steps.length !== before || p.state === 'done') await this.loadDocs(id);
+    if (p.state === 'queued' || p.state === 'running') {
+      this.timer = setTimeout(() => this.watchPreparation(id), 3000);
+    }
   }
 
   async loadDocs(id = this.application().id) {

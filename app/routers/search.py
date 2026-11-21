@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, StringConstraints
 
-from app import importers, job_intake, job_search, repository
+from app import importers, job_intake, job_search, page_reader, repository
 from app.dependencies import get_connection
 from app.errors import ConflictError, NotFoundError
 from app.schemas import ApplicationCreate, JobCreate, StrictModel
@@ -39,6 +39,7 @@ class ApplyRequest(StrictModel):
 class ApplyOut(BaseModel):
     job_id: int
     application_id: int
+    preparation: str = "idle"        # queued / running / done: the resume and cover letter are made in the background
     apply_url: str
     new_job: bool
     new_application: bool
@@ -71,7 +72,8 @@ def search(body: SearchRequest, request: Request, conn: Conn):
     if (body.date_to - body.date_from).days > 92:
         raise HTTPException(status_code=422, detail="Choose a date range of at most 3 months.")
     result = job_search.search(body.title, code, body.date_from, min(body.date_to, date.today()),
-                               request.app.state.fetch, boards=_prefs_boards(conn))
+                               request.app.state.fetch, boards=_prefs_boards(conn),
+                               request=getattr(request.app.state, "request_api", None))
     for j in result.results:
         row = conn.execute("SELECT id FROM jobs WHERE source_url = ?", (j.url,)).fetchone()
         j.already_added_job_id = row["id"] if row else None
@@ -101,12 +103,27 @@ def apply(body: ApplyRequest, request: Request, conn: Conn):
                 url = board.source_url or url
         except (ConflictError, NotFoundError):
             pass
-        if len(description) < 200 or found.description_is_excerpt:
-            notes.append("Only a short excerpt of the description was available. For a better-tailored resume, "
-                         "paste the full description into the job (Jobs → the job → Edit).")
+        if len(description) < 800 or found.description_is_excerpt:
+            # only an excerpt (e.g. Adzuna): read the posting's own page (schema.org JobPosting) ...
+            page = page_reader.fetch_posting(found.url, request.app.state.fetch_page)
+            if page is not None and len(page.description) > len(description):
+                description = page.description
+                location = location or page.location
+                found = found.model_copy(update={"description_is_excerpt": False})
+        if len(description) < 800 or found.description_is_excerpt:
+            # ... or look for the same job on the company's own careers board
+            full = importers.find_on_company_board(company, title, request.app.state.fetch)
+            if full is not None and len(full.description) > len(description):
+                description, url = full.description, full.source_url or url
+                location = full.location or location
+                found = found.model_copy(update={"description_is_excerpt": False})
+                notes.append(f"Full posting found on {company}'s careers page; Apply there: {url}")
+        if len(description) < 800 or found.description_is_excerpt:
+            notes.append("Only a short excerpt of the description was available: paste the full description in "
+                         "Materials for a resume tailored to the real requirements.")
         if len(description.strip()) < 20:
             description = f"{title} at {company} ({location}). Full description: {url}"
-        info = job_intake.intake(description, url, request.app.state.llm)
+        info = job_intake.intake(description, url, request.app.state.llm, known_title=title)
         notes += [n for n in info.notes if "No job title" not in n and "No company" not in n]
         try:
             job = repository.create_job(conn, JobCreate(
@@ -125,5 +142,12 @@ def apply(body: ApplyRequest, request: Request, conn: Conn):
         if exc.existing_id is None:
             raise
         app_id, new_app = exc.existing_id, False
+    # the resume and cover letter are made in the background, unless this application already has both
+    kinds = {r["kind"] for r in conn.execute("SELECT DISTINCT kind FROM documents WHERE application_id = ?",
+                                             (app_id,)).fetchall()}
+    if {"resume", "cover_letter"} <= kinds:
+        prep = "done"
+    else:
+        prep = request.app.state.preparer.start(app_id).state
     return ApplyOut(job_id=job_id, application_id=app_id, apply_url=url, new_job=new_job,
-                    new_application=new_app, notes=notes)
+                    new_application=new_app, notes=notes, preparation=prep)

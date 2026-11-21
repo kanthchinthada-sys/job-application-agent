@@ -172,16 +172,31 @@ def test_resume_follows_users_format(client, fake_llm, profile_data, make_job):
 def test_summary_sentence_with_added_claim_falls_back_to_your_wording(client, fake_llm, app_id):
     bad = {"sentences": [{"id": "T1", "text": "Deployed services on AWS with customer support at Example Corp (fictional)."},
                          {"id": "T2", "text": "Deployed services on AWS with customer support at Example Corp (fictional)."}]}
-    fake_llm.queue = [{"bullets": []}, bad]
+    fake_llm.queue = [{"bullets": [], **bad}]                # one AI call writes bullets AND summary sentences
     doc = make_resume(client, app_id).json()
     summary = json.loads(doc["content"])["summary"]
     assert "AWS" not in summary
-    assert any("written without AI" in w and "AWS" in w for w in doc["review"]["warnings"])
+    assert any("written without AI" in w and "AWS" in w for w in doc["review"]["notes"])     # a note, not an alarm
+    assert not any("written without AI" in w for w in doc["review"]["warnings"])
+
+
+def test_one_unbacked_summary_sentence_is_left_out_not_the_whole_summary(client, fake_llm, app_id, monkeypatch):
+    from app import tailoring
+    own = "QA engineer working on payments (FICTIONAL)."
+    good = "Built a pytest suite for a payments API used by three internal teams."
+    bad = "Cut cloud cost optimization spend by 47% across 12 data centers."
+    monkeypatch.setattr(tailoring, "compose_summary", lambda *a, **k: (f"{own} {good} {bad}", []))
+    fake_llm.queue = [{"bullets": []}]
+    doc = make_resume(client, app_id).json()
+    resume = json.loads(doc["content"])
+    assert resume["summary_source"] == "composed"
+    assert good in resume["summary"] and "cost optimization" not in resume["summary"]
+    assert any("left out" in n for n in doc["review"]["notes"])
 
 
 def test_summary_failing_the_checks_falls_back_to_own_summary(client, fake_llm, app_id, profile_data, monkeypatch):
     from app import tailoring
-    monkeypatch.setattr(tailoring, "compose_summary", lambda *a: ("Led 12 engineers deploying on AWS.", []))
+    monkeypatch.setattr(tailoring, "compose_summary", lambda *a, **k: ("Led 12 engineers deploying on AWS.", []))
     fake_llm.queue = [{"bullets": []}]
     doc = make_resume(client, app_id).json()
     resume = json.loads(doc["content"])

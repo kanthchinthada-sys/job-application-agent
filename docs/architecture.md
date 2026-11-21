@@ -33,10 +33,13 @@ flowchart LR
    saves it. An optional experience bank (`bank`) adds numbered records per employer.
 2. **Find jobs:** `job_search` asks each source in parallel, then filters by title (synonym-aware), country
    (city / region / remote-region rules) and date range, de-duplicates across sources and sorts newest first.
-3. **Apply:** `/search/apply` saves the job (`job_intake` reads its skills) and starts the application; the screen
-   then asks for the tailored resume (`selection` → `tailoring` → `layout` two-page fit → `linefit`) and the cover
-   letter (`drafting`). The user submits on the employer's page.
-4. **Add job:** `job_intake` reads title, company, location and skills from a link and/or pasted description.
+3. **Apply:** `/search/apply` saves the job (`page_reader` reads the full posting from its page when it can;
+   `job_intake` reads its skills) and starts the application. `preparation` then makes the tailored resume
+   (`selection` + `scorecard` → `tailoring` → `layout` two-page fit on a reused Chromium from `browser` → `linefit`)
+   and the cover letter (`drafting`) on the server, in the background; any screen polls
+   `GET /applications/{id}/prepare`. The user submits on the employer's page.
+4. **Add job:** `job_intake` reads title, company, location and skills from a link and/or pasted description
+   (`posting` + `vocabulary` find its sections and ATS keywords without AI).
 
 ## Request flow
 

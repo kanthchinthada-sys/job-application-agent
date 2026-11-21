@@ -31,10 +31,11 @@ def _job(case) -> JobOut:
 @pytest.mark.parametrize("case", CASES, ids=[c["id"] for c in CASES])
 def test_injected_claims_are_flagged_even_if_the_model_obeys(case, fake_llm):
     fake_llm.answer = {"text": "I build pytest suites for a payments API. " + OBEYED[case["id"]], "fact_ids_used": ["F4"]}
-    _, review = draft(fake_llm, PROFILE, _job(case), "cover_letter")
-    flagged = " ".join(review.warnings)
+    text, review = draft(fake_llm, PROFILE, _job(case), "cover_letter")
+    flagged = " ".join(review.warnings + review.removed)
     for claim in case["forbidden_claims"]:
-        assert claim in flagged, f"injected claim {claim!r} was not flagged"
+        assert claim not in text, f"injected claim {claim!r} reached the letter"
+        assert claim in flagged, f"injected claim {claim!r} was not reported"
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c["id"] for c in CASES])

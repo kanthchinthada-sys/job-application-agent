@@ -40,8 +40,8 @@ def test_prompt_contains_only_profile_facts_and_job(client, fake_llm, app_id, jo
 
 def test_invented_number_is_flagged(client, fake_llm, app_id):
     fake_llm.answer = {"text": "I cut test time by 73% across 12 teams.", "fact_ids_used": ["F1"]}
-    warnings = draft(client, app_id).json()["review"]["warnings"]
-    assert any("73" in w and "12" in w for w in warnings)
+    doc = draft(client, app_id).json()
+    assert "73" not in doc["content"] and any("73" in x and "12" in x for x in doc["review"]["removed"])
 
 
 def test_numbers_from_profile_are_not_flagged(client, fake_llm, app_id):
@@ -53,8 +53,8 @@ def test_numbers_from_profile_are_not_flagged(client, fake_llm, app_id):
 def test_claiming_a_missing_skill_is_flagged(client, fake_llm, app_id):
     # AWS is required by the fictional job but absent from the fictional profile
     fake_llm.answer = {"text": "I deploy services on AWS every day.", "fact_ids_used": ["F1"]}
-    warnings = draft(client, app_id).json()["review"]["warnings"]
-    assert any("AWS" in w for w in warnings)
+    doc = draft(client, app_id).json()
+    assert "AWS" not in doc["content"] and any("AWS" in x for x in doc["review"]["removed"])
 
 
 def test_unknown_or_missing_citations_are_flagged(client, fake_llm, app_id):
@@ -130,7 +130,7 @@ def test_sentence_copied_from_posting_is_flagged(client, fake_llm, app_id):
         "fact_ids_used": ["F4"],
     }
     doc = draft(client, app_id).json()
-    flagged = [w for w in doc["review"]["warnings"] if w.startswith("Removed from the letter, not backed by your profile")]
+    flagged = doc["review"]["removed"]
     assert len(flagged) == 1
     assert "deployed our platform with customers" in flagged[0]
     assert "deployed our platform with customers" not in doc["content"]          # removed from the letter itself
@@ -151,21 +151,10 @@ def test_letter_greeting_and_signature_come_from_the_app(client, fake_llm, app_i
     fake_llm.answer = {"text": "Dear Sir,\n\nI build pytest suites.\n\nBest regards,\nSomeone Else", "fact_ids_used": ["F4"]}
     content = draft(client, app_id).json()["content"]
     assert content.startswith("Dear Hiring Team,\n\nI'm applying for the ")
-    assert content.endswith(f"I build pytest suites.\n\nSincerely,\n{profile_data['full_name']}")
+    assert "I build pytest suites." in content
+    assert content.endswith(f"I'd welcome the chance to talk about the {content.split('the ')[1].split(' role')[0]} role."
+                            f"\n\nSincerely,\n{profile_data['full_name']}")      # a plain closing, then the signature
     assert "Someone Else" not in content and "Dear Sir" not in content
-
-
-def test_revision_removes_unsupported_sentence(client, fake_llm, app_id):
-    fake_llm.queue = [
-        {"text": "I built a pytest suite for a payments API. I have deployed our platform with customers "
-                 "and packaged services with Docker on AWS.", "fact_ids_used": ["F4"]},
-        {"text": "I built a pytest suite for a payments API used by three internal teams.", "fact_ids_used": ["F4"]},
-    ]
-    doc = draft(client, app_id).json()
-    assert "AWS" not in doc["content"]
-    assert doc["review"]["warnings"] == []
-    assert doc["review"]["humanizer"]["revision_rounds"] == 1
-    assert "NOT SUPPORTED BY THE FACTS" in fake_llm.calls[-1]["user"]
 
 
 def test_opening_added_when_letter_does_not_name_the_job(client, fake_llm, app_id, job_data):
@@ -186,28 +175,6 @@ def test_letter_prompt_asks_for_opening_and_closing(client, fake_llm, app_id):
     draft(client, app_id)
     task = fake_llm.calls[0]["user"].split("TASK")[-1]
     assert "Opening" in task and "Closing" in task
-
-
-def test_short_skill_names_like_csharp_are_checked(client, fake_llm, profile_data, make_job):
-    client.put("/profile", json=profile_data)
-    job = make_job(required_skills=["C#", "Python"], preferred_skills=["Go"])
-    app_id = client.post("/applications", json={"job_id": job["id"]}).json()["id"]
-    fake_llm.answer = {"text": "I write Java and C# automation, and some Go.", "fact_ids_used": ["F1"]}
-    warnings = client.post(f"/applications/{app_id}/drafts", json={"kind": "cover_letter"}).json()["review"]["warnings"]
-    flagged = next(w for w in warnings if "does not evidence" in w)
-    assert "C#" in flagged and "Go" in flagged
-
-
-def test_too_short_letter_is_expanded(client, fake_llm, app_id, monkeypatch):
-    from app import drafting
-    monkeypatch.setattr(drafting, "MIN_LETTER_WORDS", 150)
-    short = {"text": "I build pytest suites for a payments API.", "fact_ids_used": ["F4"]}
-    longer = {"text": " ".join(["I built a pytest suite for a payments API used by three internal teams."] * 12),
-              "fact_ids_used": ["F4"]}
-    fake_llm.queue = [short, longer]
-    doc = draft(client, app_id).json()
-    assert "TOO SHORT" in fake_llm.calls[1]["user"]
-    assert len(doc["content"].split()) > 150
 
 
 def test_job_term_backed_by_profile_evidence_is_not_flagged(client, fake_llm, profile_data, make_job):
@@ -268,3 +235,174 @@ def test_letter_prompt_lists_priorities(client, fake_llm, app_id):
     fake_llm.answer = {"text": "x", "fact_ids_used": ["F1"]}
     draft(client, app_id)
     assert "PRIORITIES (what this job needs most" in fake_llm.calls[-1]["user"]
+
+
+_FULL_LETTER = (
+    "I build pytest suites for a payments API that three internal teams use every day. "
+    "Before each release I run the regression suite and read every failure myself. "
+    "When a test fails, I work out whether the product, the test or the environment caused it. "
+    "I keep the suites fast by isolating test data and avoiding fixed waits. "
+    "I write short notes for developers so each fix is easy to verify. "
+    "I also review new API changes early, so test gaps show up before the release. "
+    "Working this way taught me to explain test results plainly to people outside engineering. "
+    "I would like to bring the same care for reliable releases to your team. "
+    "I would welcome the chance to talk about how I could help your team ship with confidence. "
+    "My checks catch most problems long before customers see them, and developers trust the results. "
+    "I enjoy turning a vague failure report into a test that proves the fix.")
+
+
+# --- sentence repair (cover letters) -------------------------------------------------------------------------
+UNBACKED = "I have deployed our platform with customers and packaged services with Docker on AWS."
+
+
+def test_a_flagged_sentence_is_rewritten_from_the_facts_closest_to_it(client, fake_llm, app_id, monkeypatch):
+    from app import drafting
+    monkeypatch.setattr(drafting, "LETTER_TARGET_WORDS", 0)            # this test is about the rewrite only
+    fake_llm.queue = [
+        {"text": f"I built a pytest suite for a payments API. {UNBACKED}", "fact_ids_used": ["F4"]},
+        {"fixes": [{"id": "S1", "text": "I worked with customer support to reproduce production issues using "
+                                        "Docker containers.", "fact_ids": ["F5"]}], "additions": []},
+    ]
+    doc = draft(client, app_id).json()
+    assert "AWS" not in doc["content"]
+    assert "reproduce production issues using Docker containers" in doc["content"]
+    assert doc["review"]["removed"] == []
+    repair_prompt = fake_llm.calls[1]["user"]
+    assert "FIX these sentences" in repair_prompt and UNBACKED in repair_prompt
+    assert "F5: At Example Corp (fictional) as Senior QA Engineer: Worked with customer support" in repair_prompt
+
+
+def test_a_rewrite_that_still_fails_is_left_out_and_reported(client, fake_llm, app_id, monkeypatch):
+    from app import drafting
+    monkeypatch.setattr(drafting, "LETTER_TARGET_WORDS", 0)
+    fake_llm.queue = [
+        {"text": f"I built a pytest suite for a payments API. {UNBACKED}", "fact_ids_used": ["F4"]},
+        {"fixes": [{"id": "S1", "text": "I packaged services with Docker on AWS for enterprise customers.",
+                    "fact_ids": ["F5"]}], "additions": []},
+    ]
+    doc = draft(client, app_id).json()
+    assert "AWS" not in doc["content"]
+    assert any("AWS" in x for x in doc["review"]["removed"]) and doc["review"]["warnings"] == []
+
+
+def test_unused_relevant_facts_complete_a_short_letter_and_invented_additions_are_refused(
+        client, fake_llm, app_id, monkeypatch):
+    from app import drafting
+    monkeypatch.setattr(drafting, "MIN_LETTER_WORDS", 30)
+    fake_llm.queue = [
+        {"text": "I built a pytest suite for a payments API used by three internal teams.", "fact_ids_used": ["F4"]},
+        {"fixes": [], "additions": [
+            {"text": "I also led a team of 12 engineers migrating services to Kubernetes on AWS.", "fact_ids": ["F5"]},
+            {"text": "I wrote manual and automated regression tests for a web application, so releases were "
+                     "checked end to end before customers saw them.", "fact_ids": ["F7"]},
+        ]},
+    ]
+    doc = draft(client, app_id).json()
+    assert "ADD" in fake_llm.calls[1]["user"]
+    assert "12 engineers" not in doc["content"]                         # invented: never added
+    assert "regression tests for a web application" in doc["content"]   # retold from a real fact
+    assert doc["review"]["humanizer"]["revision_rounds"] == 1
+
+
+def test_without_an_ai_answer_the_letter_is_completed_from_facts_word_for_word(client, fake_llm, app_id, monkeypatch):
+    from app import drafting
+    monkeypatch.setattr(drafting, "MIN_LETTER_WORDS", 40)
+    fake_llm.queue = [
+        {"text": "I built a pytest suite for a payments API used by three internal teams.", "fact_ids_used": ["F4"]},
+        {"fixes": [], "additions": []},                                 # the repair gives nothing back
+    ]
+    content = draft(client, app_id).json()["content"]
+    assert "At Example Corp (fictional), I worked with customer support to reproduce production issues" in content
+
+
+def test_a_short_letter_is_flagged_only_when_the_profile_has_more_to_say(client, fake_llm, app_id, monkeypatch):
+    from app import drafting
+    monkeypatch.setattr(drafting, "MIN_LETTER_WORDS", 500)              # nothing can reach this
+    fake_llm.queue = [{"text": "I built a pytest suite for a payments API used by three internal teams.",
+                       "fact_ids_used": ["F4"]}, {"fixes": [], "additions": []}]
+    warnings = draft(client, app_id).json()["review"]["warnings"]
+    # every relevant fact was used (the AI gave nothing, the rest were retold word for word): no length warning
+    assert not any(w.startswith("The letter is short") for w in warnings)
+
+
+def test_short_skill_names_like_csharp_are_checked(client, fake_llm, profile_data, make_job):
+    client.put("/profile", json=profile_data)
+    job = make_job(required_skills=["C#", "Python"], preferred_skills=["Go"])
+    app_id = client.post("/applications", json={"job_id": job["id"]}).json()["id"]
+    fake_llm.queue = [{"text": "I write Java and C# automation, and some Go.", "fact_ids_used": ["F1"]},
+                      {"fixes": [], "additions": []}]
+    doc = client.post(f"/applications/{app_id}/drafts", json={"kind": "cover_letter"}).json()
+    assert "C#" not in doc["content"]                                   # the unbacked claim is gone
+    removed = doc["review"]["removed"][0]
+    assert "C#" in removed and "Go" in removed
+
+
+def test_screening_answers_still_revise_once(client, fake_llm, app_id):
+    fake_llm.queue = [{"text": "I have deployed our platform with customers on AWS for many years now.",
+                       "fact_ids_used": ["F4"]},
+                      {"text": "I built a pytest suite for a payments API.", "fact_ids_used": ["F4"]}]
+    doc = draft(client, app_id, kind="screening_answer", question="Tell us about your API testing.").json()
+    assert "AWS" not in doc["content"] and "NOT SUPPORTED BY THE FACTS" in fake_llm.calls[-1]["user"]
+
+
+def test_an_unusable_repair_answer_never_fails_the_letter(client, fake_llm, app_id, monkeypatch):
+    from app import drafting
+    from app.llm import LLMOutputError
+    monkeypatch.setattr(drafting, "MIN_LETTER_WORDS", 40)
+    answers = iter([{"text": f"I built a pytest suite for a payments API. {UNBACKED}", "fact_ids_used": ["F4"]}])
+
+    def generate(system, user, schema):
+        fake_llm.calls.append({"system": system, "user": user, "schema": schema})
+        try:
+            return next(answers)
+        except StopIteration:
+            raise LLMOutputError("The model's answer was not valid JSON.")   # e.g. cut off at the token cap
+    monkeypatch.setattr(fake_llm, "generate_json", generate)
+    doc = draft(client, app_id).json()
+    assert "AWS" not in doc["content"] and "pytest suite" in doc["content"]
+    assert doc["review"]["removed"]
+
+
+
+def test_details_none_of_your_facts_state_are_caught_even_when_the_posting_never_mentions_them(profile_data):
+    from datetime import datetime
+    from app import drafting
+    from app.schemas import JobOut
+    p = Profile(**profile_data)
+    facts = drafting.build_facts(p)
+    job = JobOut(id=1, title="QA Lead (fictional)", company="Example Health (fictional)", description="Lead QA.",
+                 required_skills=["Leadership"], created_at=datetime.now())
+    invented = ["The suite covered endpoints for transaction validation, fraud detection, and reconciliation.",
+                "At Sample Systems, I supported QA processes by managing test cases and coordinating with "
+                "cross-functional teams."]
+    honest = ["At Example Corp, I built a pytest suite for a payments API used by three internal teams.",
+              "I used Docker containers to reproduce production issues with customer support.",
+              "At Sample Systems I used Selenium and JIRA for regression tests."]      # per-job tools are facts too
+    for s in invented:
+        assert any(x.startswith("Details none of your facts state") for x in drafting.sentence_problems(s, facts, p, job)), s
+    for s in honest:
+        assert drafting.sentence_problems(s, facts, p, job) == [], s
+
+
+def test_a_fact_is_told_once_and_the_letter_ends_by_asking_to_talk():
+    from datetime import datetime
+    from app import drafting
+    from app.schemas import JobOut
+    body = ("At Example Corp, I built a pytest suite for a payments API used by three internal teams.\n\n"
+            "The suite supported three internal teams by automating test cases for the payments API. "
+            "I worked with customer support to reproduce production issues using Docker containers.")
+    once = drafting.drop_retold_sentences(body)
+    assert "automating test cases" not in once and "Docker containers" in once
+    job = JobOut(id=1, title="QA Lead (fictional)", company="Example (fictional)", description="x",
+                 required_skills=["QA"], created_at=datetime.now())
+    assert drafting.ensure_closing(once, job).endswith("I'd welcome the chance to talk about the QA Lead (fictional) role.")
+    asked = once + "\n\nI'd like to talk about how I test APIs."
+    assert drafting.ensure_closing(asked, job) == asked                # already asks: nothing added
+
+
+def test_a_paragraph_never_opens_with_a_sentence_that_points_at_nothing():
+    from app import drafting
+    body = ("I'm applying for the role. I build data pipelines.\n\n"
+            "This work ensured reliable data flow. I profiled datasets with pandas and SQL.")
+    assert drafting.drop_dangling_sentences(body) == ("I'm applying for the role. I build data pipelines.\n\n"
+                                                       "I profiled datasets with pandas and SQL.")

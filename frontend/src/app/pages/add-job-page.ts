@@ -45,7 +45,8 @@ import { Msg, MsgBox } from '../ui';
         <p class="small muted">Found by: {{ foundBy(a) }}</p>
         @for (n of a.intake.notes; track $index) { <div class="small warn-text">{{ n }}</div> }
         <button class="secondary" type="button" (click)="saveChanges(a.job)">Save changes</button>
-        <button class="primary" type="button" (click)="router.navigate(['/jobs', a.job.id])">See skill match</button>
+        <button class="primary" type="button" [disabled]="preparing()" (click)="prepare(a.job)">Prepare resume + cover letter</button>
+        <button class="secondary" type="button" (click)="router.navigate(['/jobs', a.job.id])">See skill match</button>
         <app-msg [msg]="editMsg()" />
       </div>
     }
@@ -100,7 +101,31 @@ export class AddJobPage {
     return Object.entries(a.intake.found_by).map(([k, v]) => `${k}: ${v}`).join(' · ');
   }
 
-  async saveChanges(job: Job) {
+  protected readonly preparing = signal(false);
+
+  /** Start the application and make the tailored resume and cover letter in the background. */
+  async prepare(job: Job) {
+    this.preparing.set(true);
+    try {
+      await this.saveChanges(job, true);
+      let appId: number;
+      try {
+        appId = (await this.api.startApplication(job.id)).id;
+      } catch (e) {
+        const err = e as ApiError;
+        if (err.status !== 409 || !err.data?.existing_id) throw e;
+        appId = err.data.existing_id;                 // already started: use it
+      }
+      await this.api.prepare(appId);
+      this.router.navigate(['/applications', appId]);
+    } catch (e) {
+      this.editMsg.set({ kind: 'bad', text: (e as ApiError).message });
+    } finally {
+      this.preparing.set(false);
+    }
+  }
+
+  async saveChanges(job: Job, quiet = false) {
     const required = splitSkills(this.required());
     if (!required.length) {
       this.editMsg.set({ kind: 'bad', text: 'Keep at least one required skill.' });
@@ -113,7 +138,7 @@ export class AddJobPage {
       };
       if (this.location().trim()) body['location'] = this.location().trim();
       await this.api.updateJob(job.id, body);
-      this.editMsg.set({ kind: 'ok', text: 'Saved.' });
+      if (!quiet) this.editMsg.set({ kind: 'ok', text: 'Saved.' });
     } catch (e) {
       this.editMsg.set({ kind: 'bad', text: (e as ApiError).message });
     }

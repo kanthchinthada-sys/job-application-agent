@@ -47,14 +47,22 @@ works (rules instead of AI for reading postings; your own wording for resumes an
 
 | Source | Covers | Needs |
 |---|---|---|
+| [JSearch](https://rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch) | Google for Jobs: LinkedIn, Indeed, Glassdoor, ZipRecruiter and company sites, any country | A free key in `JSEARCH_API_KEY` (`.env`): from [OpenWeb Ninja](https://www.openwebninja.com/api/jsearch) (100 requests a month, 1 per search) or RapidAPI (200 a month, 2 per search) |
 | [Adzuna](https://developer.adzuna.com) | Country-wide search of many job boards (Canada, US, UK, most of Europe, India, Australia, …) | A free key: put `ADZUNA_APP_ID` and `ADZUNA_APP_KEY` in `.env` (see `.env.example`) |
+| [Jooble](https://jooble.org/api/about) | Country-wide search of many job boards, 60+ countries | A free key: `JOOBLE_API_KEY` in `.env` (free keys have a limited number of requests) |
+| [The Muse](https://www.themuse.com/developers/api/v2) | Company jobs in major cities and remote | Nothing |
+| [Himalayas](https://himalayas.app/api) | Remote jobs with the countries they accept | Nothing |
+| [RemoteOK](https://remoteok.com) | Remote jobs | Nothing |
 | [Remotive](https://remotive.com) | Remote jobs | Nothing |
 | [Jobicy](https://jobicy.com) | Remote jobs, filtered by country | Nothing |
 | [Arbeitnow](https://www.arbeitnow.com) | Europe (mostly Germany) and remote | Nothing |
 | Company career pages | Greenhouse, Lever and Ashby boards you list in your profile (`preferences.company_boards`) | Nothing |
 
-These are public, free APIs meant to be read by other sites. LinkedIn, Indeed and Glassdoor don't allow
-automated searching, so they are not used: add those jobs with **Add job**. Each source is asked separately, so
+These are public, free APIs meant to be read by other sites. LinkedIn, Indeed, Glassdoor and hiring.cafe don't
+allow automated searching (hiring.cafe blocks bots), so the app doesn't read them; JSearch covers the first three
+through Google for Jobs, and **Search elsewhere** buttons open your search on each of them (and on Canada's Job
+Bank) in your browser. Add a job you find there with **Add job**. Himalayas, RemoteOK and The Muse ask to be
+credited, so each of their jobs shows a "via …" link back to them. Each source is asked separately, so
 one being down never stops the others, and the results say which sources answered.
 
 ### Your data and privacy
@@ -229,8 +237,14 @@ versions (`POST /documents/{id}/versions`). Nothing is overwritten.
 How drafts stay honest (`app/drafting.py`):
 - The model only sees your profile as numbered facts (F1, F2, ...) and must cite the ones it used.
 - Deterministic checks then flag: numbers not in your profile or the posting, job skills your profile doesn't
-  evidence, unknown fact ids, and sentences that look lifted from the job posting rather than your profile.
-- A revise pass asks the model to fix flagged sentences; a revision is kept only if it is no less honest.
+  evidence, unknown fact ids, sentences that look lifted from the job posting, and (cover letters) sentences whose
+  details none of your facts state ("fraud detection" when your facts never mention it).
+- Cover letters are checked sentence by sentence. Each priority comes with the text of its evidence facts; one
+  repair call rewrites every flagged sentence from the facts closest to it and, for a letter under 150 words, adds
+  sentences from relevant facts it doesn't use yet. Every rewritten or added sentence is checked again; one that
+  still fails is left out (listed under "Left out of the letter", never kept with a warning). Without a usable AI
+  answer, unused facts are retold word for word. A fact is told once, and the letter ends by asking to talk.
+- Screening answers get one revise pass; a revision is kept only if it is no less honest.
 - The greeting and your signature are added by the app, never by the model.
 
 Humanizer (`app/humanizer.py`): style rules based on Wikipedia's "Signs of AI writing" are given to the model,
@@ -245,7 +259,16 @@ File > Print > Save as PDF. How it stays honest (`app/tailoring.py`):
   skills and description); skills the job asks for are listed first.
 - The AI lightly rewords the selected bullets; each rewording is compared with its original and rejected if
   it adds a number, a job skill, more than 3 words from the posting, AI-sounding phrasing, or 10+ words.
-- The AI-written summary goes through the cover-letter checks; if it fails, your own summary is used.
+- The summary is 5-6 sentences (about 6-7 printed lines): your own opening sentence (framed for the job only if
+  it stays true), one sentence for each of the job's top requirements built from 1-2 of your records, a line on
+  working with clients for client-facing roles, and one measured result when you have one. Each sentence goes
+  through the cover-letter checks, and a sentence that only repeats a bullet printed below it is left out. If too
+  little passes, your own summary is used.
+- **Requirements → your experience → where it is on the resume** (Materials): every requirement of the posting,
+  whether your records meet it fully, partly or not at all (what is shown and what is missing), and for each
+  record the employer and bullet number it printed at, or that it was cut to fit two pages. People-skill lines
+  ("curiosity", "seller-doer mindset") are shown separately and are never counted as gaps; lines about where and
+  how you work (hybrid days, in-person, the application process) are not requirements at all.
 - The screen shows every reworded bullet next to its original, and every rejected rewording with the reason.
 
 Quick try against your real Ollama: `python scripts/try_ai.py`.
@@ -264,8 +287,10 @@ Tests never call Ollama: they use a fake model (`FakeLLM` in `tests/conftest.py`
 
 ## ATS keyword analysis
 
-Every tailored resume is scored the way most applicant tracking systems filter: do the posting's keywords
-appear literally (`app/ats.py`)? Keywords your profile evidences in different words (e.g. "business
+Every tailored resume is scored the way most applicant tracking systems filter: do the posting's **technical**
+keywords appear literally on the printed resume (`app/ats.py`)? People skills, ways of working and hiring words
+("curiosity", "hybrid working policy", "recruitment process") are not scored; they are listed as "not scored". Each
+match shows the resume line where an ATS finds it. Keywords your profile evidences in different words (e.g. "business
 acceptance testing" for **UAT**, Jenkins for **CI/CD**) are added in the job's wording, each with the profile
 sentence that backs it (your experience bank counts too, and combined keywords like "Python/Java/Go" count when any
 of them is there). Keywords nothing supports are reported as **gaps**, never added.
@@ -333,10 +358,17 @@ app/
   greenhouse_filler.py  Playwright form filler (never submits)
   extraction.py    AI skill extraction + check against the original text
   job_intake.py    add a job from a link / description: title, company, location, skills
-  job_search.py    Find jobs: Adzuna, Remotive, Jobicy, Arbeitnow, company boards; country and date filters
+  page_reader.py   read a full posting from its web page (schema.org JobPosting data)
+  posting.py       posting structure (required / preferred sections) and its ATS keywords
+  vocabulary.py    skill names tech postings ask for, with aliases (reading and ATS scoring only)
+  job_search.py    Find jobs: JSearch, Adzuna, Jooble, The Muse, Himalayas, RemoteOK, Remotive, Jobicy, Arbeitnow, company boards
   resume_import.py read a resume (PDF / Word / text) into a profile preview
   bank.py          experience bank import (routing, duplicates, statuses)
   selection.py     per-job selection of bank records, skills section
+  scorecard.py     recruiter-style read of your bullets: role family, bullet strength, hiring scorecard
+  preparation.py   background preparation of resume + cover letter, one application at a time
+  metrics.py       timing per stage and per AI call for one preparation
+  browser.py       one reused headless Chromium for page measurements
   layout.py        two-page fitting (estimate + Chromium measurement)
   linefit.py       even justification by honest re-lengthening of lines
   dependencies.py  per-request database connection
@@ -345,7 +377,8 @@ app/
 tests/             pytest suite (each test gets its own temporary database)
   e2e/             Playwright browser tests of the user journeys
 examples/          FICTIONAL profile and job for development
-scripts/          try_ai.py, evaluate_ai.py, apply_greenhouse.py (assisted apply), metrics.py
+scripts/          try_ai.py, evaluate_ai.py, apply_greenhouse.py (assisted apply), metrics.py,
+                  benchmark_prepare.py (times resume + cover letter preparation on a copy of your data)
 docs/             architecture.md
 frontend/         Angular screen: src/app/api.ts (all backend calls), pages/ (find jobs, jobs, add job, applications,
                   materials, resume card, apply plan, handoff, profile), *.spec.ts unit tests
@@ -363,8 +396,10 @@ Requests flow **router → repository → SQLite**, and the match endpoint addit
 | GET / PUT | `/profile` | Read / create-or-replace the profile |
 | POST | `/profile/resume` | Read a resume file into a profile preview (not saved) |
 | POST | `/profile/bank` | Import an experience bank |
+| POST | `/profile/experience-line` | Add one verified line of experience in your own words |
 | POST | `/jobs/quick` | Add a job from its link and/or description |
 | PATCH | `/jobs/{id}` | Fix a job's title, company, location, description or skills |
+| POST | `/jobs/{id}/refresh` | Read the full posting again from the job's link |
 | GET | `/search/countries` | Countries Find jobs can search |
 | POST | `/search` | Find jobs by title, country and date range (not saved) |
 | POST | `/search/apply` | Save a found job and start its application (never submits) |
@@ -376,6 +411,7 @@ Requests flow **router → repository → SQLite**, and the match endpoint addit
 | GET | `/ai/status` | Ollama reachable / model downloaded |
 | POST | `/ai/extract-skills` | AI skill suggestions from a description (not saved) |
 | POST | `/applications/{id}/drafts` | Draft a cover letter or screening answer (AI, saved as a version) |
+| POST / GET | `/applications/{id}/prepare` | Make the resume and cover letter in the background / check progress |
 | GET | `/applications/{id}/documents` | All material versions for an application |
 | POST | `/documents/{id}/versions` | Save your edited text as a new version |
 | GET | `/documents/{id}/print` | Printable tailored resume (save as PDF from the browser) |
@@ -454,7 +490,7 @@ Plain `python -m pytest` runs only the fast API/unit tests (e2e tests are opt-in
 ## Known limitations / next steps
 
 - Reading a job from its link alone works for Greenhouse, Lever and Ashby; other sites need the description pasted.
-- Find jobs covers the free sources above; without an Adzuna key, most results are remote jobs.
+- Find jobs covers the free sources above; without a JSearch, Adzuna or Jooble key, most results are remote jobs or from The Muse.
 - Assisted apply supports Greenhouse only; Lever/Ashby jobs use the apply-by-hand checklist. You always click Submit.
 - Password protection is single-user; sessions are kept in memory, so a restart signs you out.
 - The local 8B model is slower and writes less fluently than large cloud models; always review drafts.

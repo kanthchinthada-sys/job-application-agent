@@ -34,6 +34,7 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
 tr.needs-you { background: var(--warnbg); }
+tr.soft td { color: var(--muted); }
 .muted { color: var(--muted); }
 .small { font-size: 13px; }
 .good { color: var(--ok); }
@@ -48,3 +49,8 @@ a { color: var(--accent); }
 .chip.related { background: #eef6f0; border: 1px dashed var(--ok); }
 .ai-look { margin-top: 14px; }
 .warn-text { color: #9a5b00; }
+
+/* "I have this" next to an ATS gap, and its one-line form */
+button.link { background: none; border: none; padding: 0 .3rem; color: var(--accent, #2563eb); text-decoration: underline; cursor: pointer; }
+.gap-form { margin: .5rem 0; padding: .6rem; border: 1px solid #ddd; border-radius: 6px; display: grid; gap: .4rem; }
+.gap-form textarea, .gap-form select { width: 100%; }

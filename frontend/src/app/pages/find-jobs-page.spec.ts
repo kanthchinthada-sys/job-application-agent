@@ -10,6 +10,8 @@ const JOB = {
 };
 
 describe('FindJobsPage', () => {
+  beforeEach(() => sessionStorage.clear());
+
   async function render() {
     const ctx = setup([FindJobsPage]);
     const fixture = TestBed.createComponent(FindJobsPage);
@@ -42,7 +44,7 @@ describe('FindJobsPage', () => {
     expect(text(fixture)).toContain('Adzuna: Off: add a free key.');
   });
 
-  it('apply opens the employer page and prepares the resume and cover letter', async () => {
+  it('apply opens the employer page, and the resume and letter are prepared in the background', async () => {
     const { fixture, http } = await render();
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
     button(fixture, 'Search').click();
@@ -52,17 +54,28 @@ describe('FindJobsPage', () => {
     button(fixture, 'Apply').click();
     expect(open).toHaveBeenCalledWith(JOB.url, '_blank', 'noopener');
     http.expectOne('/search/apply').flush({ job_id: 3, application_id: 5, apply_url: JOB.url, new_job: true,
-                                            new_application: true, notes: [] });
+                                            new_application: true, notes: [], preparation: 'queued' });
     await settle(fixture);
-    const resume = http.expectOne('/applications/5/drafts');
-    expect(resume.request.body).toEqual({ kind: 'resume' });
-    resume.flush({ id: 1 });
-    await settle(fixture);
-    const letter = http.expectOne('/applications/5/drafts');
-    expect(letter.request.body).toEqual({ kind: 'cover_letter' });
-    letter.flush({ id: 2 });
+    http.expectOne('/applications/5/prepare').flush({ application_id: 5, state: 'done', step: null, message: '',
+      done_steps: ['resume', 'cover_letter'], started_at: null, finished_at: null });
     await settle(fixture);
     expect(text(fixture)).toContain('Ready: resume and cover letter prepared.');
     open.mockRestore();
+  });
+
+  it('keeps your search when you leave the tab and come back', async () => {
+    const first = await render();
+    button(first.fixture, 'Search').click();
+    first.http.expectOne('/search').flush({ method: 'job_search_v1', query: 'QA Engineer', country: 'Canada',
+      date_from: '2026-11-08', date_to: '2026-11-14', results: [JOB], sources: [] });
+    await settle(first.fixture);
+    first.fixture.destroy();                                   // you open another tab ...
+    const again = TestBed.createComponent(FindJobsPage);       // ... and come back
+    again.detectChanges();
+    first.http.expectOne('/search/countries').flush({ countries: [{ code: 'CA', name: 'Canada', adzuna: true }],
+                                                      adzuna_configured: false });
+    await settle(again);
+    expect(text(again)).toContain('Globex (fictional)');
+    expect((again.nativeElement.querySelector('#f-title') as HTMLInputElement).value).toBe('QA Engineer');
   });
 });

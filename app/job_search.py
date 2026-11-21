@@ -2,26 +2,40 @@
 
 Sources (only public, free APIs that are meant to be read by other sites; nothing is scraped):
 
+* JSearch        Google for Jobs results: LinkedIn, Indeed, Glassdoor, ZipRecruiter and company sites; needs a FREE
+                 key in JSEARCH_API_KEY: from OpenWeb Ninja ("ak_...", 100 requests a month, 1 per search) or
+                 RapidAPI (200 requests a month, 2 per search)
 * Adzuna         country-wide search of many job boards; needs a FREE key (ADZUNA_APP_ID / ADZUNA_APP_KEY in .env)
+* Jooble         country-wide search of many job boards; needs a FREE key (JOOBLE_API_KEY in .env)
+* The Muse       curated company jobs in major cities and remote (no key)
+* Himalayas      remote jobs with country eligibility (no key)
+* RemoteOK       remote jobs (no key)
 * Remotive       remote jobs, keyword search
 * Jobicy         remote jobs, keyword + country filter
 * Arbeitnow      Europe (mostly Germany) and remote jobs
 * Company boards the Greenhouse / Lever / Ashby career pages you list in your preferences ("company_boards")
 
-LinkedIn, Indeed and Glassdoor don't allow automated searching, so they are not used.
+LinkedIn, Indeed, Glassdoor and hiring.cafe don't allow automated searching (hiring.cafe blocks bots), so the
+app doesn't read them directly: JSearch covers the first three through Google for Jobs, and "Search elsewhere"
+links open your search on each site in your browser.
+
+Sources that ask for credit (Himalayas, RemoteOK, The Muse) get a visible "via ..." link on every job.
 
 Every source is asked separately; one failing never stops the others, and the result says which sources
 answered. Results are filtered by YOUR three filters (title, country, date range), de-duplicated across sources
 (same title and company), and sorted newest first. Nothing is saved until you press Apply.
 """
 
+import json
 import os
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
+
+import httpx
 
 from pydantic import BaseModel
 
@@ -121,6 +135,7 @@ class FoundJob(BaseModel):
     description_is_excerpt: bool = False
     remote: bool = False
     where: str = ""                  # why it counts for your country: "Toronto, ON" or "Remote (worldwide)"
+    credit_url: str = ""             # the posting on the source site (some sources require this link)
     title_match: str = "strong"      # strong | partial
     already_added_job_id: int | None = None
 
@@ -133,6 +148,12 @@ class SourceStatus(BaseModel):
     note: str = ""
 
 
+class ElsewhereLink(BaseModel):
+    name: str
+    url: str
+    note: str = ""
+
+
 class SearchResult(BaseModel):
     method: str = METHOD
     query: str
@@ -141,9 +162,38 @@ class SearchResult(BaseModel):
     date_to: str
     results: list[FoundJob]
     sources: list[SourceStatus]
+    elsewhere: list[ElsewhereLink] = []      # the same search on sites the app can't read: opens in your browser
 
 
 Fetcher = Callable[[str], object]
+# (method, url, headers, json body) -> parsed JSON: for sources that need a key in a header or a POST
+Requester = Callable[[str, str, dict, object], object]
+
+
+def http_request(method: str, url: str, headers: dict | None = None, body: object = None) -> object:
+    try:
+        r = httpx.request(method, url, headers={"User-Agent": "job-application-agent (personal use)", **(headers or {})},
+                          json=body, timeout=25)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"could not reach {url.split('/')[2]}: {exc.__class__.__name__}") from exc
+    if r.status_code in (401, 403):
+        raise RuntimeError(f"the key was refused (HTTP {r.status_code}): check it in .env")
+    if r.status_code == 429:
+        raise RuntimeError("the free monthly limit is used up (HTTP 429)")
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    return r.json()
+
+
+def _rows(data, *keys: str) -> list[dict]:
+    """The list of jobs in an API answer, wherever it is."""
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        for k in keys:
+            if isinstance(data.get(k), list):
+                return [x for x in data[k] if isinstance(x, dict)]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -221,19 +271,27 @@ def src_remotive(fetch: Fetcher, query: str, country: Country) -> list[FoundJob]
 
 
 def src_jobicy(fetch: Fetcher, query: str, country: Country) -> list[FoundJob]:
-    tag = query.strip()[:50]
+    """The latest jobs for the country (filtered by title here), plus Jobicy's own keyword search when the title
+    fits its limit (3-20 characters)."""
     geo = f"&geo={country.jobicy}" if country.jobicy else ""
-    url = f"https://jobicy.com/api/v2/remote-jobs?count=100{geo}" + (f"&tag={quote_plus(tag)}" if len(tag) >= 3 else "")
-    data = fetch(url)
-    out = []
-    for j in data.get("jobs", []) if isinstance(data, dict) else []:
-        geo_text = str(j.get("jobGeo") or "")
-        out.append(FoundJob(source="Jobicy", title=unescape(str(j.get("jobTitle", ""))).strip(),
-                            company=unescape(str(j.get("companyName", ""))).strip(),
-                            location=f"Remote ({geo_text})" if geo_text else "Remote",
-                            posted=_day(j.get("pubDate")), url=str(j.get("url", "")),
-                            description=_text(j.get("jobDescription") or j.get("jobExcerpt")),
-                            description_is_excerpt=not j.get("jobDescription"), remote=True))
+    urls = [f"https://jobicy.com/api/v2/remote-jobs?count=100{geo}"]
+    tag = query.strip()
+    if 3 <= len(tag) <= 20:
+        urls.append(f"https://jobicy.com/api/v2/remote-jobs?count=100{geo}&tag={quote_plus(tag)}")
+    out, seen = [], set()
+    for url in urls:
+        data = fetch(url)
+        for j in data.get("jobs", []) if isinstance(data, dict) else []:
+            if j.get("id") in seen:
+                continue
+            seen.add(j.get("id"))
+            geo_text = str(j.get("jobGeo") or "")
+            out.append(FoundJob(source="Jobicy", title=unescape(str(j.get("jobTitle", ""))).strip(),
+                                company=unescape(str(j.get("companyName", ""))).strip(),
+                                location=f"Remote ({geo_text})" if geo_text else "Remote",
+                                posted=_day(j.get("pubDate")), url=str(j.get("url", "")),
+                                description=_text(j.get("jobDescription") or j.get("jobExcerpt")),
+                                description_is_excerpt=not j.get("jobDescription"), remote=True))
     return out
 
 
@@ -286,6 +344,187 @@ def src_boards(fetch: Fetcher, query: str, country: Country, boards: list[str]) 
     return out
 
 
+# cities The Muse lists jobs under (it has no country filter); remote jobs are listed as "Flexible / Remote"
+MUSE_CITIES = {
+    "CA": ["Toronto, Canada", "Vancouver, Canada", "Montreal, Canada", "Ottawa, Canada", "Calgary, Canada",
+           "Waterloo, Canada", "Edmonton, Canada", "Mississauga, Canada"],
+    "US": ["New York, NY", "San Francisco, CA", "Seattle, WA", "Austin, TX", "Boston, MA", "Chicago, IL",
+           "Los Angeles, CA", "Atlanta, GA", "Denver, CO", "Washington, DC"],
+    "GB": ["London, United Kingdom", "Manchester, United Kingdom", "Edinburgh, United Kingdom"],
+    "IN": ["Bangalore, India", "Hyderabad, India", "Pune, India", "Chennai, India"],
+    "DE": ["Berlin, Germany", "Munich, Germany"],
+    "AU": ["Sydney, Australia", "Melbourne, Australia"],
+}
+MUSE_CATEGORIES = ["Software Engineering", "Data and Analytics", "Data Science", "IT", "Computer and IT",
+                   "Design and UX", "Product", "Project Management"]
+
+
+def src_muse(fetch: Fetcher, query: str, country: Country) -> list[FoundJob]:
+    params = "".join(f"&category={quote_plus(c)}" for c in MUSE_CATEGORIES)
+    params += "".join(f"&location={quote_plus(c)}" for c in MUSE_CITIES.get(country.code, []) + ["Flexible / Remote"])
+    out = []
+    for page in range(0, 5):
+        data = fetch(f"https://www.themuse.com/api/public/jobs?page={page}&descending=true{params}")
+        rows = _rows(data, "results")
+        for j in rows:
+            locs = [str(x.get("name") if isinstance(x, dict) else x) for x in (j.get("locations") or [])]
+            # keep the locations in this country (a "Flexible / Remote" job is checked by the usual rules)
+            here = [x for x in locs if where_for(x, country, "remote" in x.lower())] or locs
+            landing = str((j.get("refs") or {}).get("landing_page") or j.get("url") or "")
+            out.append(FoundJob(source="The Muse", title=str(j.get("name") or j.get("title") or "").strip(),
+                                company=str((j.get("company") or {}).get("name") or "").strip(),
+                                location="; ".join(here) or "Not stated",
+                                posted=_day(j.get("publication_date")), url=landing, credit_url=landing,
+                                description=_text(j.get("contents")),
+                                remote=any("remote" in x.lower() or "flexible" in x.lower() for x in here)))
+        if len(rows) < 20:
+            break
+    return out
+
+
+def src_himalayas(fetch: Fetcher, query: str, country: Country) -> list[FoundJob]:
+    out = []
+    for page in (1, 2, 3):
+        data = fetch(f"https://himalayas.app/jobs/api/search?q={quote_plus(query)}&country={country.code}"
+                     f"&sort=recent&page={page}")
+        rows = _rows(data, "jobs", "data", "results")
+        for j in rows:
+            limits = [str(x.get("name") if isinstance(x, dict) else x) for x in (j.get("locationRestrictions") or [])]
+            loc = f"Remote ({', '.join(limits)})" if limits else "Remote (worldwide)"
+            guid = str(j.get("guid") or "")
+            credit = guid if guid.startswith("http") else "https://himalayas.app/jobs"
+            out.append(FoundJob(source="Himalayas", title=str(j.get("title") or "").strip(),
+                                company=str(j.get("companyName") or "").strip(), location=loc,
+                                posted=_day(j.get("pubDate")),
+                                url=str(j.get("applicationLink") or credit),   # their terms: apply link unchanged
+                                credit_url=credit, description=_text(j.get("description") or j.get("excerpt")),
+                                description_is_excerpt=not j.get("description"), remote=True))
+        if len(rows) < 20:
+            break
+    return out
+
+
+def _remoteok_tag(query: str) -> str:
+    words = [w for w in re.findall(r"[a-z0-9]+", query.lower()) if w not in {"senior", "sr", "junior", "jr", "lead",
+                                                                               "staff", "principal", "remote"}]
+    return "-".join(words[:2]) if words else ""
+
+
+def src_remoteok(fetch: Fetcher, query: str, country: Country) -> list[FoundJob]:
+    urls = ["https://remoteok.com/api"]
+    tag = _remoteok_tag(query)
+    if tag:
+        urls.append(f"https://remoteok.com/api?tag={quote_plus(tag)}")
+        if "-" in tag:
+            urls.append(f"https://remoteok.com/api?tag={quote_plus(tag.split('-')[0])}")
+    out, seen = [], set()
+    for url in urls:
+        for j in _rows(fetch(url)):
+            if not j.get("position") or j.get("id") in seen:     # the first item is RemoteOK's legal notice
+                continue
+            seen.add(j.get("id"))
+            page = str(j.get("url") or "")
+            out.append(FoundJob(source="RemoteOK", title=unescape(str(j.get("position"))).strip(),
+                                company=unescape(str(j.get("company") or "")).strip(),
+                                location=f"Remote ({j['location']})" if j.get("location") else "Remote",
+                                posted=_day(j.get("date") or j.get("epoch")), url=page or str(j.get("apply_url") or ""),
+                                credit_url=page, description=_text(j.get("description")), remote=True))
+    return out
+
+
+def jsearch_configured() -> bool:
+    return bool(os.environ.get("JSEARCH_API_KEY"))
+
+
+def jooble_configured() -> bool:
+    return bool(os.environ.get("JOOBLE_API_KEY"))
+
+
+def _jsearch_window(days: int) -> str:
+    return "today" if days <= 1 else "3days" if days <= 3 else "week" if days <= 7 else "month" if days <= 31 else "all"
+
+
+def src_jsearch(request: Requester, query: str, country: Country, days: int) -> list[FoundJob]:
+    """Google for Jobs (LinkedIn, Indeed, Glassdoor, ZipRecruiter, company sites) through JSearch on RapidAPI."""
+    key = os.environ.get("JSEARCH_API_KEY", "")
+    params = (f"query={quote_plus(f'{query} in {country.name}')}&page=1&country={country.code.lower()}"
+              f"&date_posted={_jsearch_window(days)}")
+    if key.startswith("ak_"):
+        # a key from OpenWeb Ninja (the company behind JSearch): same data, their own address; the free plan has
+        # 100 requests a month, so one page (10 jobs) per search
+        data = request("GET", f"https://api.openwebninja.com/jsearch/search-v2?{params}&num_pages=1",
+                       {"X-API-Key": key}, None)
+    else:                                   # a RapidAPI key
+        data = request("GET", f"https://jsearch.p.rapidapi.com/search?{params}&num_pages=2",
+                       {"X-RapidAPI-Key": key, "X-RapidAPI-Host": "jsearch.p.rapidapi.com"}, None)
+    rows = _rows(data, "data", "jobs")
+    if not rows and isinstance(data, dict) and isinstance(data.get("data"), dict):
+        rows = _rows(data["data"], "jobs", "data", "results")       # search-v2 may nest the list
+    out = []
+    for j in rows:
+        parts = [j.get("job_city"), j.get("job_state"), j.get("job_country")]
+        loc = j.get("job_location") or ", ".join(str(p) for p in parts if p) or country.name
+        if country.name.lower() not in loc.lower() and (j.get("job_country") or "").upper() == country.code:
+            loc = f"{loc}, {country.name}"
+        remote = bool(j.get("job_is_remote"))
+        publisher = str(j.get("job_publisher") or "").strip()
+        out.append(FoundJob(source=f"{publisher} (via JSearch)" if publisher else "JSearch",
+                            title=str(j.get("job_title") or "").strip(),
+                            company=str(j.get("employer_name") or "").strip(),
+                            location=loc + (" (Remote)" if remote and "remote" not in loc.lower() else ""),
+                            posted=_day(j.get("job_posted_at_datetime_utc") or j.get("job_posted_at_timestamp")),
+                            url=str(j.get("job_apply_link") or ""), description=_text(j.get("job_description")),
+                            remote=remote))
+    return out
+
+
+def src_jooble(request: Requester, query: str, country: Country) -> list[FoundJob]:
+    key = os.environ.get("JOOBLE_API_KEY", "")
+    out = []
+    for page in (1, 2):
+        data = request("POST", f"https://jooble.org/api/{quote(key)}", {"Content-Type": "application/json"},
+                       {"keywords": query, "location": country.name, "page": str(page)})
+        rows = _rows(data, "jobs")
+        for j in rows:
+            loc = str(j.get("location") or country.name)
+            if country.name.lower() not in loc.lower():
+                loc = f"{loc}, {country.name}"           # searched in this country: say so
+            out.append(FoundJob(source="Jooble", title=_text(j.get("title")), company=str(j.get("company") or "").strip(),
+                                location=loc, posted=_day(j.get("updated")), url=str(j.get("link") or ""),
+                                description=_text(j.get("snippet")), description_is_excerpt=True,
+                                remote="remote" in (str(j.get("type") or "") + loc).lower()))
+        if len(rows) < 20:
+            break
+    return out
+
+
+INDEED_HOSTS = {"CA": "ca.indeed.com", "GB": "uk.indeed.com", "IN": "in.indeed.com", "AU": "au.indeed.com",
+                "DE": "de.indeed.com", "FR": "fr.indeed.com", "NL": "nl.indeed.com", "IE": "ie.indeed.com",
+                "SG": "sg.indeed.com", "AE": "ae.indeed.com", "ES": "es.indeed.com", "IT": "it.indeed.com"}
+
+
+def elsewhere_links(query: str, country: Country, days: int) -> list[ElsewhereLink]:
+    """The same search on sites that don't allow automated searching: they open in your browser."""
+    q, place = quote_plus(query), quote_plus(country.name)
+    links = [
+        ElsewhereLink(name="hiring.cafe", note="set the country in its filters",
+                      url="https://hiring.cafe/?searchState=" + quote(json.dumps(
+                          {"searchQuery": query, "dateFetchedPastNDays": max(1, days)}, separators=(",", ":")))),
+        ElsewhereLink(name="LinkedIn", url=f"https://www.linkedin.com/jobs/search/?keywords={q}&location={place}"
+                      f"&f_TPR=r{max(1, days) * 86400}"),
+        ElsewhereLink(name="Indeed", url=f"https://{INDEED_HOSTS.get(country.code, 'www.indeed.com')}/jobs?q={q}"
+                      f"&l={'' if country.code in INDEED_HOSTS else place}&fromage={min(max(1, days), 14)}"),
+        ElsewhereLink(name="Glassdoor", url=f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q}"
+                      f"&locKeyword={place}"),
+        ElsewhereLink(name="Google Jobs", url=f"https://www.google.com/search?q={quote_plus(query + ' jobs ' + country.name)}"
+                      "&ibp=htl;jobs"),
+    ]
+    if country.code == "CA":
+        links.append(ElsewhereLink(name="Job Bank (Government of Canada)",
+                                   url=f"https://www.jobbank.gc.ca/jobsearch/jobsearch?searchstring={q}&locationstring=Canada"))
+    return links
+
+
 # ---------------------------------------------------------------------------
 # search
 # ---------------------------------------------------------------------------
@@ -295,15 +534,29 @@ def adzuna_configured() -> bool:
 
 
 def search(query: str, country_code: str, date_from: date, date_to: date, fetch: Fetcher,
-           boards: list[str] | None = None) -> SearchResult:
+           boards: list[str] | None = None, request: Requester | None = None) -> SearchResult:
+    request = request or http_request
     country = COUNTRIES[country_code]
     days = (date.today() - date_from).days + 1
     tasks: dict[str, Callable[[], list[FoundJob]]] = {
         "Remotive": lambda: src_remotive(fetch, query, country),
         "Jobicy": lambda: src_jobicy(fetch, query, country),
         "Arbeitnow": lambda: src_arbeitnow(fetch, query, country),
+        "The Muse": lambda: src_muse(fetch, query, country),
+        "Himalayas": lambda: src_himalayas(fetch, query, country),
+        "RemoteOK": lambda: src_remoteok(fetch, query, country),
     }
     statuses: list[SourceStatus] = []
+    if jsearch_configured():
+        tasks["JSearch"] = lambda: src_jsearch(request, query, country, days)
+    else:
+        statuses.append(SourceStatus(name="JSearch", ok=False, note="Off: add a free JSEARCH_API_KEY (RapidAPI) to .env "
+                                     "for LinkedIn, Indeed and Glassdoor jobs through Google for Jobs."))
+    if jooble_configured():
+        tasks["Jooble"] = lambda: src_jooble(request, query, country)
+    else:
+        statuses.append(SourceStatus(name="Jooble", ok=False, note="Off: add a free JOOBLE_API_KEY to .env for "
+                                     "country-wide results from many job boards."))
     if country.adzuna and adzuna_configured():
         tasks["Adzuna"] = lambda: src_adzuna(fetch, query, country, days)
     elif country.adzuna:
@@ -344,17 +597,21 @@ def search(query: str, country_code: str, date_from: date, date_to: date, fetch:
             if key in kept:
                 # keep the version with the most useful details (full description, direct employer link)
                 old = kept[key]
-                if (old.description_is_excerpt and not j.description_is_excerpt) or (old.source == "Adzuna" != j.source):
+                aggregators = ("Adzuna", "Jooble")
+                if (old.description_is_excerpt and not j.description_is_excerpt) or (
+                        old.source in aggregators and j.source not in aggregators):
                     kept[key] = j
                 continue
             kept[key] = j
             n_kept += 1
         statuses.append(SourceStatus(name=name, ok=True, found=len(jobs), kept=n_kept))
     results = sorted(kept.values(), key=lambda j: (j.posted or "", j.title_match == "strong"), reverse=True)
-    order = {"Adzuna": 0, "Remotive": 1, "Jobicy": 2, "Arbeitnow": 3, "Company boards": 4}
-    statuses.sort(key=lambda s: order.get(s.name, 9))
+    order = {"JSearch": 0, "Adzuna": 1, "Jooble": 2, "The Muse": 3, "Himalayas": 4, "RemoteOK": 5, "Remotive": 6,
+             "Jobicy": 7, "Arbeitnow": 8, "Company boards": 9}
+    statuses.sort(key=lambda s: (not s.ok, order.get(s.name, 99)))
     return SearchResult(query=query, country=country.name, date_from=start, date_to=end,
-                        results=results[:MAX_RESULTS], sources=statuses)
+                        results=results[:MAX_RESULTS], sources=statuses,
+                        elsewhere=elsewhere_links(query, country, (date_to - date_from).days + 1))
 
 
 def default_range(days: int = 7) -> tuple[date, date]:

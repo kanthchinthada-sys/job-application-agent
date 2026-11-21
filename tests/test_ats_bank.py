@@ -46,3 +46,15 @@ def test_resume_uses_smart_justification_without_hyphenation():
     html = render_letter("FICTIONAL letter.", "Test Person", {}, "SDET", "Example Corp")
     assert 'class="smart-justify"' in html and "window.smartJustify" in html
     assert "hyphens: auto" not in html     # hyphenation would split keywords for ATS readers
+
+
+def test_a_shorter_different_word_is_not_a_match():
+    from app.ats import resume_has
+    assert not resume_has("Validated cross-tenant access restrictions (FICTIONAL).", "accessibility testing")
+    assert resume_has("Built automated test frameworks (FICTIONAL).", "automation frameworks")
+
+
+def test_quality_reporting_counts_as_quality_metrics():
+    from app.ats import find_evidence
+    assert find_evidence("Established reporting for defect escape trends and regression stability (FICTIONAL).",
+                         "quality metrics")

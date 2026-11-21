@@ -6,6 +6,7 @@ fits here fits on paper.
 """
 
 import math
+import re
 
 CHARS_PER_LINE = 112        # full-width paragraph (summary, skills)
 CHARS_PER_BULLET_LINE = 108  # bullets are indented
@@ -63,13 +64,21 @@ ROLE_WEIGHT = [1.0, 1.0, 0.9, 0.9, 0.9]     # above the minimums, the least rele
 
 
 def fit(resume, scores: dict[str, float] | None = None, ai_or_fde: bool = False,
-        max_pages: int = MAX_PAGES, budget_override: float | None = None, min_bullets=None) -> dict:
+        max_pages: int = MAX_PAGES, budget_override: float | None = None, min_bullets=None,
+        protect: list[str] | None = None) -> dict:
     """Trim `resume` in place until it fits `max_pages`. Returns what was removed.
 
     Order: skills headings are tightened (named tools are kept longest), then the least relevant bullets go,
     weighed by role recency, never below each role's minimum. Nothing is reworded or invented.
     """
     scores = scores or {}
+    # the job's keywords: skills and bullets that contain them are trimmed last (they are what an ATS looks for)
+    keys = [k.lower() for k in (protect or []) if k.strip()]
+
+    def has_key(text: str) -> int:
+        from app.ats import resume_has            # the same test the ATS score uses
+        return sum(1 for k in keys if resume_has(text, k))
+
     budget = budget_override if budget_override is not None else max_pages * LINES_PER_PAGE - SAFETY_LINES
     removed: list[str] = []
     trimmed_skills: list[str] = []
@@ -81,6 +90,7 @@ def fit(resume, scores: dict[str, float] | None = None, ai_or_fde: bool = False,
         from app.selection import _is_tool
         for g in resume.skill_groups:
             if len(g["skills"]) > cap:
+                g["skills"].sort(key=lambda s: not has_key(s))       # stable: job keywords first
                 keep = g["skills"][:cap]
                 # make room for named tools before generic phrases
                 extra_tools = [s for s in g["skills"][cap:] if _is_tool(s)]
@@ -100,7 +110,7 @@ def fit(resume, scores: dict[str, float] | None = None, ai_or_fde: bool = False,
                 continue
             w = ROLE_WEIGHT[min(i, len(ROLE_WEIGHT) - 1)]
             for j, b in enumerate(role.bullets):
-                base = scores.get(b.source_id or "", 0.0)
+                base = scores.get(b.source_id or "", 0.0) + 3.0 * has_key(b.text)
                 out.append((base * w - 0.01 * j, ("role", i, j), b.source_id or b.text[:40]))
         for i, proj in enumerate(resume.projects):
             items = proj.get("highlights") or []
@@ -110,6 +120,7 @@ def fit(resume, scores: dict[str, float] | None = None, ai_or_fde: bool = False,
             w = 1.1 if ai_or_fde else 0.6           # AI/FDE roles: the LLM project outranks older bullets
             for j, h in enumerate(items):
                 base = scores.get(proj.get("highlight_ids", [None] * len(items))[j] or "", 0.0) if proj.get("highlight_ids") else 0.0
+                base += 3.0 * has_key(h)
                 out.append(((base or (len(items) - j)) * w - 0.01 * j, ("project", i, j), h[:40]))
         return out
 
@@ -156,33 +167,24 @@ def browser_measure(html: str) -> tuple[float, int] | None:
     """
     if os.environ.get("JOB_AGENT_PAGE_MEASURE", "auto") == "off":
         return None
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_measure_now, html).result(timeout=60)
+    from app import browser as chromium
 
-
-def _measure_now(html: str) -> tuple[float, int] | None:
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return None
-    try:
-        with sync_playwright() as pw:
-            exe = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
-            browser = pw.chromium.launch(**({"executable_path": exe} if exe else {}))
-            page = browser.new_page(viewport={"width": 816, "height": 1056})   # US Letter at 96 dpi
-            page.set_content(html)
-            page.emulate_media(media="print")
+    def measure(b):
+        page = chromium.print_page(b, html)
+        try:
             height = page.evaluate("() => document.querySelector('[contenteditable]').getBoundingClientRect().height")
             pdf = page.pdf(format="Letter", prefer_css_page_size=True)
-            browser.close()
+        finally:
+            page.close()
         return height / (10.5 * 1.25 * 96 / 72), pdf.count(b"/Type /Page") - pdf.count(b"/Type /Pages")
+    try:
+        return chromium.run(measure, timeout=60)      # one Chromium, kept open between measurements
     except Exception:            # no Chromium installed, sandbox issues, ...: fall back to the estimate
         return None
 
 
 def fit_measured(resume, render_html, scores=None, ai_or_fde=False, max_pages: int = MAX_PAGES, min_bullets=None,
-                 measure=browser_measure) -> dict:
+                 measure=browser_measure, protect: list[str] | None = None) -> dict:
     """Fit using the estimate, calibrated by one real measurement, then confirm with the browser.
 
     `render_html(resume) -> str`. Without a browser this is the same as `fit` (cautious estimate).
@@ -190,7 +192,7 @@ def fit_measured(resume, render_html, scores=None, ai_or_fde=False, max_pages: i
     original = copy.deepcopy(resume)
     first = measure(render_html(resume))
     if first is None:
-        report = fit(resume, scores, ai_or_fde, max_pages, min_bullets=min_bullets)
+        report = fit(resume, scores, ai_or_fde, max_pages, min_bullets=min_bullets, protect=protect)
         report["measured"] = False
         return report
     real_lines, first_pages = first
@@ -206,7 +208,7 @@ def fit_measured(resume, render_html, scores=None, ai_or_fde=False, max_pages: i
     def attempt_at(tighten: float, floors=min_bullets):
         attempt = copy.deepcopy(original)
         rep = fit(attempt, scores, ai_or_fde, max_pages, budget_override=(capacity - tighten) / factor,
-                  min_bullets=floors)
+                  min_bullets=floors, protect=protect)
         result = measure(render_html(attempt))
         tries[tighten] = (attempt, rep, result[1] if result else None)
         return tries[tighten]

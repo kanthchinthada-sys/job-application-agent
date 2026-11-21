@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from app.matching import ALIASES, normalize
 
-METHOD = "ats_keywords_v1"
+METHOD = "ats_keywords_v2"   # v2: technical keywords only; every match shows the resume line
 
 # job keyword (normalised) -> phrases in a profile that honestly evidence it
 EQUIVALENTS: dict[str, list[str]] = {
@@ -54,6 +54,10 @@ EQUIVALENTS: dict[str, list[str]] = {
     "load testing": ["k6", "sustained load"],
     "performance testing": ["k6", "p95/p99 latency"],
     "bdd": ["cucumber", "bdd"],
+    # quality reporting you describe in your own words counts as "quality metrics"
+    "quality metrics": ["defect escape", "regression stability", "test metrics", "quality metrics",
+                        "quality reporting", "coverage gaps"],
+    "test metrics": ["defect escape", "regression stability", "test metrics"],
 }
 
 
@@ -65,11 +69,13 @@ class Keyword(BaseModel):
 
 class ATSReport(BaseModel):
     method: str
+    compared: int = 0             # how many of the job's keywords were compared (0: the job lists no skills)
     score: float                  # % of weighted job keywords found literally in the resume
     max_honest_score: float       # score if every evidenced keyword were added
     matched: list[Keyword]
     missing_but_evidenced: list[Keyword]
     gaps: list[Keyword]           # nothing in the profile supports these
+    not_scored: list[str] = []    # people skills, ways of working, hiring words: not an ATS keyword (v2)
     note: str
 
 
@@ -105,7 +111,7 @@ def find_evidence(profile_text: str, keyword: str) -> str | None:
 def _alternatives(keyword: str) -> list[str]:
     """ "Python/Java/Scala/go" -> its alternatives. Not for fixed pairs like CI/CD or names with spaces."""
     k = keyword.strip()
-    if "/" not in k or " " in k or k.lower() in ("ci/cd", "a/b", "tcp/ip", "i/o"):
+    if "/" not in k or re.search(r"\b(ci/cd|a/b|tcp/ip|i/o|ui/ux|24/7)\b", k.lower()):
         return []
     alts = [a.strip() for a in k.split("/") if a.strip()]
     return alts if len(alts) > 1 and all(len(a) > 1 for a in alts) else []
@@ -122,6 +128,8 @@ def resume_has(resume_text: str, keyword: str, profile=None) -> bool:
         return True
     if any(keyword_in(resume_text, a) for a in _alternatives(keyword)):
         return True
+    if m := re.fullmatch(r"(.+?)\s*\((.+)\)", keyword.strip()):     # "version control (Git)": either names it
+        return resume_has(resume_text, m.group(1), profile) or resume_has(resume_text, m.group(2), profile)
     from app import evidence as ev
     words = ev._content_words(keyword)
     return len(words) > 1 and ev._all_words_present(keyword.lower(), " ".join(resume_text.lower().split()))
@@ -137,6 +145,10 @@ def profile_evidence(profile_text: str, keyword: str, profile=None) -> str | Non
         return found
     from app import evidence as ev
     from app.bank import bank_profile
+    # your verified experience-bank records that didn't make this resume still count as your own words
+    records = [r.text for r in getattr(profile, "experience_bank", []) if r.status == "verified"]
+    if records and (found := find_evidence("\n".join(records), keyword)):
+        return found
     m = ev.match_requirement(bank_profile(profile), keyword)
     if not m.evidence:
         return None
@@ -144,24 +156,44 @@ def profile_evidence(profile_text: str, keyword: str, profile=None) -> str | Non
     return best.text + (f" (related: {best.via})" if best.related else "")
 
 
+def resume_line(resume_text: str, keyword: str) -> str | None:
+    """The resume line where an ATS would find the keyword (or one of its alternatives)."""
+    lines = [x.strip() for x in resume_text.splitlines() if x.strip()]
+    for kw in [keyword] + _alternatives(keyword):
+        for line in lines:
+            if keyword_in(line, kw):
+                for sentence in re.split(r"(?<=[.!?])\s+", line):     # the sentence, not a whole role
+                    if keyword_in(sentence, kw):
+                        return sentence[:220]
+    return None
+
+
 def analyze(resume_text: str, profile_text: str, required: list[str], preferred: list[str],
             exclude: set[str] = frozenset(), profile=None) -> ATSReport:
+    from app.vocabulary import is_technical
     keywords = [(k, 2) for k in required] + [(k, 1) for k in preferred if k not in required]
-    matched, evidenced, gaps = [], [], []
+    matched, evidenced, gaps, not_scored = [], [], [], []
     for kw, weight in keywords:
-        if kw.lower() in exclude:
+        if kw.lower() in exclude or kw.strip().lower() in ("untitled job",):    # job-title words / placeholders
+            continue
+        if not is_technical(kw):
+            not_scored.append(kw)
             continue
         if resume_has(resume_text, kw, profile):
-            matched.append(Keyword(keyword=kw, weight=weight))
+            matched.append(Keyword(keyword=kw, weight=weight, evidence=resume_line(resume_text, kw)))
             continue
         evidence = profile_evidence(profile_text, kw, profile)
         (evidenced if evidence else gaps).append(Keyword(keyword=kw, weight=weight, evidence=evidence))
     total = sum(k.weight for k in matched + evidenced + gaps) or 1
     score = round(100 * sum(k.weight for k in matched) / total, 1)
     best = round(100 * sum(k.weight for k in matched + evidenced) / total, 1)
+    compared = len(matched + evidenced + gaps)
+    note = ("Technical keywords only (how most ATS filters work); people skills and ways of working are left "
+            "out. Gaps can only be closed with real experience, e.g. a small project you actually build.")
+    if compared == 0:
+        note = ("This job lists no skills to compare (often only a short excerpt of the posting was available). "
+                "Paste the full job description, then tailor the resume again.")
     return ATSReport(
-        method=METHOD, score=score, max_honest_score=best, matched=matched,
-        missing_but_evidenced=evidenced, gaps=gaps,
-        note="Keyword match only (how most ATS filters work). Gaps can only be closed with real experience, "
-             "e.g. a small project you actually build.",
+        method=METHOD, compared=compared, score=score, max_honest_score=best, matched=matched,
+        missing_but_evidenced=evidenced, gaps=gaps, not_scored=list(dict.fromkeys(not_scored)), note=note,
     )

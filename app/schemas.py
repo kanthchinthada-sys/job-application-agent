@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Annotated, Literal
 
 from pydantic import (
+    BeforeValidator,
     AfterValidator,
     BaseModel,
     ConfigDict,
@@ -106,7 +107,7 @@ class BankRecord(StrictModel):
     """One numbered line of your experience bank (e.g. AG24). Only 'verified' records ever reach a resume."""
 
     id: Annotated[str, StringConstraints(pattern=r"^[A-Z]{2,5}\d{2,3}$")]
-    text: LongText
+    text: Annotated[LongText, BeforeValidator(lambda v: " ".join(v.split()) if isinstance(v, str) else v)]
     owner: NonEmptyStr                      # the employer (as in your experience) or project name it belongs to
     owner_kind: Literal["experience", "project"]
     group: NonEmptyStr | None = None        # category label from the bank, e.g. "Performance engineering"

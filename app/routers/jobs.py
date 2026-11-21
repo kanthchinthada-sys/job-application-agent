@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Path, Request
 
 from pydantic import BaseModel
 
-from app import ai_match, importers, job_intake, matching, repository
+from app import ai_match, importers, job_intake, matching, page_reader, repository
 from app.dependencies import get_connection
 from app.errors import ConflictError
 from app.schemas import JobCreate, JobOut, JobQuickAdd, JobUpdate, MatchReport
@@ -50,6 +50,12 @@ def quick_add(body: JobQuickAdd, request: Request, conn: Conn):
                 board = importers.fetch_job(link, request.app.state.fetch)
         except ConflictError:
             board = None                     # not a supported board: the description is needed
+    page = None
+    if url and board is None and len(description.strip()) < 800:
+        # any other job page: read its schema.org JobPosting (most job sites publish one)
+        page = page_reader.fetch_posting(url, request.app.state.fetch_page)
+        if page is not None and len(page.description) > len(description):
+            description = page.description
     if board is not None:
         url = board.source_url
         if len(board.description) >= len(description):
@@ -59,9 +65,16 @@ def quick_add(body: JobQuickAdd, request: Request, conn: Conn):
         if row:
             raise ConflictError(f"This posting is already in your jobs (job id {row['id']}).", existing_id=row["id"])
     if len(description.strip()) < 50:
-        raise HTTPException(status_code=422, detail="Paste the job description too: this link can't be read "
-                                                    "automatically (only Greenhouse, Lever and Ashby links can).")
+        raise HTTPException(status_code=422, detail="Paste the job description too: this page doesn't publish "
+                                                    "its posting in a form the app can read.")
     info = job_intake.intake(description, url, request.app.state.llm, use_ai=body.use_ai)
+    if page is not None and description == page.description:
+        if page.title:
+            info.title, info.found_by["title"] = page.title, "job page"
+        if page.company:
+            info.company, info.found_by["company"] = page.company, "job page"
+        if page.location:
+            info.location, info.found_by["location"] = page.location, "job page"
     if board is not None:
         info.title, info.company = board.title, board.company
         info.location = board.location or info.location
@@ -79,9 +92,44 @@ def quick_add(body: JobQuickAdd, request: Request, conn: Conn):
 
 
 @router.patch("/{job_id}", response_model=JobOut, responses={404: {"description": "Job not found"}})
-def update_job(job_id: JobId, body: JobUpdate, conn: Conn):
-    """Fix the title, company, location or skills that were read from the posting."""
-    return repository.update_job(conn, job_id, body.model_dump(exclude_unset=True, exclude_none=True))
+def update_job(job_id: JobId, body: JobUpdate, request: Request, conn: Conn):
+    """Fix the title, company, location, description or skills that were read from the posting.
+
+    A new description without skills: the skills are read again from it (rules, plus the local AI if running)."""
+    changes = body.model_dump(exclude_unset=True, exclude_none=True)
+    if "description" in changes and "required_skills" not in changes:
+        job = repository.get_job(conn, job_id)
+        info = job_intake.intake(changes["description"], job.source_url and str(job.source_url),
+                                 request.app.state.llm, known_title=changes.get("title", job.title))
+        changes["required_skills"], changes["preferred_skills"] = info.required_skills, info.preferred_skills
+    return repository.update_job(conn, job_id, changes)
+
+
+@router.post("/{job_id}/refresh", response_model=JobOut,
+             responses={404: {"description": "Job not found"}, 409: {"description": "The page can't be read"}})
+def refresh_job(job_id: JobId, request: Request, conn: Conn):
+    """Read the full posting again from the job's link (its schema.org JobPosting, or the Greenhouse / Lever /
+    Ashby API) and read the skills from it again. Use it when only a short excerpt was saved."""
+    job = repository.get_job(conn, job_id)
+    if not job.source_url:
+        raise ConflictError("This job has no link to read. Paste the full description instead.")
+    url = str(job.source_url)
+    description = None
+    try:
+        link = importers.parse_link(url)
+        if link.job_id:
+            description = importers.fetch_job(link, request.app.state.fetch).description
+    except ConflictError:
+        pass
+    if not description:
+        page = page_reader.fetch_posting(url, request.app.state.fetch_page)
+        description = page.description if page else None
+    if not description or len(description) <= len(job.description):
+        raise ConflictError("The full posting couldn't be read from its page. Open the posting, copy the "
+                            "description and paste it instead.")
+    info = job_intake.intake(description, url, request.app.state.llm, known_title=job.title)
+    return repository.update_job(conn, job_id, {"description": description, "required_skills": info.required_skills,
+                                                "preferred_skills": info.preferred_skills})
 
 
 @router.get("", response_model=list[JobOut])

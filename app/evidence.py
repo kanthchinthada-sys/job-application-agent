@@ -11,6 +11,7 @@ Rules, all visible here so every match can be checked:
 Every match returns the exact profile text it found, so you can see why it counted.
 """
 
+import functools
 import re
 
 from pydantic import BaseModel
@@ -45,6 +46,34 @@ def normalize(skill: str) -> str:
 
 # requirement term (normalised) -> words/phrases in a profile that show it. Edit freely; keep every entry defensible.
 RELATED: dict[str, list[str]] = {
+    # multi-tenant cloud services are SaaS-like, but not the same: shown as related, never added to your skills
+    "quality metrics": ["defect escape", "regression stability", "quality reporting", "test metrics", "coverage gaps"],
+    "go-no-go": ["go/no-go", "go-no-go", "release readiness", "release risks", "release decisions", "sign-off"],
+    "release readiness": ["release readiness", "release risks", "go/no-go", "release decisions", "release verification"],
+    "saas": ["cross-tenant", "multi-tenant", "tenant isolation", "cloud-service", "cloud services"],
+    # mobile / release / AI-assisted work (from real postings)
+    "ios": ["appium", "mobile automation", "mobile app", "xcuitest", "ios"],
+    "android": ["appium", "mobile automation", "mobile app", "espresso", "android"],
+    "mobile testing": ["appium", "mobile automation", "mobile"],
+    "release automation": ["release regression", "release validation", "pipeline", "jenkins", "github actions", "ci/cd"],
+    "agentic workflows": ["claude code", "copilot", "agent", "agents", "agentic", "ai-assisted", "ai-generated"],
+    "ai agents": ["agent", "agents", "agentic", "llm", "language model"],
+    "claude": ["claude", "claude code"],
+    "root cause analysis": ["root cause", "investigated", "isolate", "diagnos", "correlating", "distinguishing"],
+    "debugging": ["debug", "investigated", "troubleshoot", "diagnos"],
+    "troubleshooting": ["troubleshoot", "investigated", "debug", "diagnos"],
+    "acceptance criteria": ["acceptance", "requirements", "testable scenarios", "test conditions"],
+    "release cycles": ["release", "regression", "ci/cd", "pipeline"],
+    "version control": ["git", "github", "bitbucket", "svn"],
+    "test plans": ["test plans", "test planning", "test strategy", "test strategies"],
+    "test planning": ["test plans", "test planning", "test strategy", "test strategies"],
+    "collaboration": ["collaborat", "partnered", "worked with", "stakeholders", "cross-functional"],
+    "communication": ["communicat", "presented", "stakeholders", "reported", "documented"],
+    "ownership": ["owned", "end-to-end", "led"],
+    "llm": ["llm", "language model", "ollama", "ai-generated", "generated content"],
+    "evaluation frameworks": ["evaluation", "evaluate", "prompt-regression", "metamorphic", "adversarial"],
+    "observability": ["observability", "monitoring", "opensearch", "prometheus", "grafana", "logs", "metrics"],
+    "alerting": ["alert", "monitoring", "prometheus", "grafana"],
     # engineering practice
     "api testing": ["api testing", "api tests", "api automation", "rest assured", "postman", "tested apis", "api responses"],
     "api": ["api", "apis", "rest assured", "postman"],
@@ -228,8 +257,16 @@ def _stem(word: str) -> str:
 def _all_words_present(phrase: str, text: str) -> bool:
     """Every content word of the phrase appears in the text, allowing a different ending (payload/payloads)."""
     tokens = re.findall(r"[a-z0-9+#.]+", text)
-    stems = {_stem(t) for t in tokens}
-    return all((w in tokens) or (len(w) > 6 and _stem(w) in stems) or (w + "s") in tokens or
+    by_stem: dict[str, int] = {}
+    for t in tokens:
+        by_stem[_stem(t)] = max(by_stem.get(_stem(t), 0), len(t))
+
+    def same_word(w: str) -> bool:
+        # another ending of the same word (payload/payloads, automated/automation), not a shorter different word
+        # ("access" is not "accessibility")
+        return len(w) > 6 and by_stem.get(_stem(w), 0) >= len(w) - 3
+
+    return all((w in tokens) or same_word(w) or (w + "s") in tokens or
                (w.endswith("s") and w[:-1] in tokens) for w in _content_words(phrase))
 
 
@@ -250,10 +287,37 @@ def vocabulary(profile: Profile) -> set[str]:
 
 
 def requirement_parts(requirement: str, vocab: set[str]) -> list[str]:
-    """The skills a requirement names: its short parts, plus known skill names inside a long sentence."""
+    """The skills a requirement names: its short parts, plus known skill names inside a long sentence.
+
+    Matching a job means asking this for every (bullet, requirement) pair, so the answer is cached per
+    requirement and vocabulary."""
+    return list(_requirement_parts_cached(requirement, frozenset(vocab)))
+
+
+@functools.lru_cache(maxsize=4096)
+def _requirement_parts_cached(requirement: str, vocab: frozenset) -> tuple[str, ...]:
+    return tuple(_requirement_parts(requirement, vocab))
+
+
+def _requirement_parts(requirement: str, vocab) -> list[str]:
+    # "go/no-go" is a release decision, not the Go language
+    requirement = re.sub(r"\bgo\s*/\s*no[- ]go\b|\bno[- ]go\b", "go-no-go", requirement, flags=re.IGNORECASE)
     parts = []
+    lead_words = {"to", "and", "or", "the", "a", "an", "with", "of", "for", "in", "on", "our", "your", "its", "be",
+                  "strong", "proven", "solid", "good", "excellent", "deep", "hands-on", "ability", "able"}
     for p in split_parts(requirement):
         words = p.split()
+        while words and words[0] in lead_words:            # "to mentor" -> "mentor"
+            words = words[1:]
+        # a leading -ing verb names the activity, not the skill: "assessing release readiness" -> "release readiness"
+        while len(words) >= 2 and words[0].endswith("ing") and " ".join(words) not in RELATED \
+                and words[0] not in vocab and words[0] not in RELATED:
+            words = words[1:]
+        p = " ".join(words)
+        if not p or (len(words) == 1 and p.endswith("ing") and p not in vocab and p not in RELATED):
+            continue                                       # "maintaining", "including": not a skill
+        if "go-no-go" in p:
+            p = "go-no-go"
         if len(words) >= 3 and p not in RELATED:
             # a long phrase: its meaningful words are the skills ("customer-facing", "deployment", ...)
             subs = [w for w in words if w in RELATED or w in vocab]
@@ -273,6 +337,12 @@ def requirement_parts(requirement: str, vocab: set[str]) -> list[str]:
     for _, term in sorted(found):
         if term not in parts:
             parts.append(term)
+    # the posting vocabulary's names for what the line asks ("mentor" -> "mentoring", "quality metrics")
+    from app.vocabulary import find_terms
+    for _, _, name in find_terms(requirement):
+        name = name.lower()
+        if name not in parts and (name in RELATED or name in vocab):
+            parts.append(name)
     # drop a part already covered by a longer one ("cloud" inside "cloud and container technologies" stays: both
     # are useful); only exact duplicates are removed above.
     return parts
@@ -328,57 +398,47 @@ def match_requirement(profile: Profile, requirement: str, texts: list[tuple[str,
 # Requirements from the posting text
 # ---------------------------------------------------------------------------
 
-_REQUIRED_HEAD = re.compile(r"^\s*(required|minimum|basic)?\s*(qualifications|requirements|what you('ll)? need|"
-                            r"what we('re)? looking for|you have|must have)\b.*:?\s*$", re.IGNORECASE)
-_PREFERRED_HEAD = re.compile(r"^\s*(preferred|desired|nice to have|bonus|good to have|additional)\b.*:?\s*$",
-                             re.IGNORECASE)
-_OTHER_HEAD = re.compile(r"^\s*(responsibilities|what you('ll)? do|about|benefits|why|the role|compensation)\b",
+# Section headings, in the many ways postings write them ("What you need to be successful", "Who you are", ...).
+_REQUIRED_HEAD = re.compile(
+    # phrases that only ever start a heading ("What you need to be successful", "Who you are", ...)
+    r"^\s*(?:(required|minimum|basic|key|core)\s+(qualifications|requirements|skills|experience)\b.*|"
+    r"(qualifications|requirements)\b.*|what you('ll)? (need|bring)\b.*|what we('re)? looking for\b.*|"
+    r"what we need\b.*|who you are\b.*|about you\b.*|you('ll)? (have|bring)\s*:?|you are\s*:?|"
+    r"your (profile|skills|experience|background)\b.*|must[- ]haves?\b.*|(the )?ideal candidate\b.*|"
+    r"what makes you\b.*|is this you\b.*|what it takes\b.*|to be successful\b.*|"
+    r"you('ll)? thrive if\b.*|you might be a fit if\b.*|"
+    # single words that are headings only when they stand alone ("Skills", "Experience and skills:")
+    r"(skills|experience|expertise)( (and|&) (experience|skills|qualifications))?\s*:?)\s*$", re.IGNORECASE)
+_PREFERRED_HEAD = re.compile(r"^\s*(preferred|desired|desirable|nice[- ]to[- ]have|bonus|good to have|additional|"
+                             r"plus(es)?|extra credit|it('s| is| would be) (great|nice|a plus)|even better|ideally|"
+                             r"brownie points)\b.*:?\s*$", re.IGNORECASE)
+_OTHER_HEAD = re.compile(r"^\s*(responsibilities|key responsibilities|what you('ll)? (be )?do(ing)?|about|benefits|"
+                         r"perks|why|the role|your role|compensation|what you('ll)? get|what we offer|our offer|"
+                         r"pay range|salary|how to apply|our (hiring|interview) process|location|working at)\b",
                          re.IGNORECASE)
 _SECTION_END = re.compile(r"^\s*(at [\w&.]+,? we|please note|the estimated|in addition, this role|we offer|"
-                          r"equal opportunity|this role is eligible)\b", re.IGNORECASE)
+                          r"equal opportunity|this role is eligible|in compliance with|pay range)\b", re.IGNORECASE)
+_PREFERRED_LINE = re.compile(r"\b(nice to have|is a plus|a plus|are a plus|bonus|preferred|desirable|ideally)\b",
+                             re.IGNORECASE)
 
 
-_RESP_HEAD = re.compile(r"^\s*(responsibilities|key responsibilities|what you('ll)? do|in this role|the role|"
-                        r"your impact|day to day)\b.*:?\s*$", re.IGNORECASE)
+_RESP_HEAD = re.compile(r"^\s*(responsibilities|key responsibilities|what you('ll)? (be )?do(ing)?|in this role|"
+                        r"the role|your role|your impact|day to day|your mission|key accountabilities|"
+                        r"what the job involves|you will)\b.*:?\s*$", re.IGNORECASE)
+
+
+def _clean_line(raw: str) -> str:
+    return raw.replace("\u2019", "'").replace("\u2018", "'").strip(" \t•*-–·")
 
 
 def posting_responsibilities(description: str) -> list[str]:
-    """The 'Responsibilities' lines of a posting (empty if it has no such section)."""
-    out: list[str] = []
-    collecting = False
-    for raw in description.splitlines():
-        line = raw.strip(" \t•*-–·")
-        if not line:
-            continue
-        if _RESP_HEAD.match(line) and len(line) < 60:
-            collecting = True
-            continue
-        if collecting and ((_REQUIRED_HEAD.match(line) or _PREFERRED_HEAD.match(line) or _OTHER_HEAD.match(line))
-                           and len(line) < 60 or _SECTION_END.match(line)):
-            break
-        if collecting and 3 <= len(line.split()) <= 60:
-            out.append(line)
-    return out
+    """The duty lines of a posting ("What you'll do", "Responsibilities", "Your impact", ...): app/posting.py."""
+    from app import posting
+    return [l for l in posting.requirement_lines(description)[2] if 3 <= len(l.split()) <= 60]
 
 
 def posting_requirements(description: str) -> tuple[list[str], list[str]]:
-    """The 'Required' and 'Preferred' qualification lines of a posting (empty if it has no such sections)."""
-    required: list[str] = []
-    preferred: list[str] = []
-    current: list[str] | None = None
-    for raw in description.splitlines():
-        line = raw.strip(" \t•*-–·")
-        if not line:
-            continue
-        if _PREFERRED_HEAD.match(line) and len(line) < 60:
-            current = preferred
-            continue
-        if _REQUIRED_HEAD.match(line) and len(line) < 60:
-            current = required
-            continue
-        if (_OTHER_HEAD.match(line) and len(line) < 80) or _SECTION_END.match(line):
-            current = None
-            continue
-        if current is not None and 1 <= len(line.split()) <= 60:
-            current.append(line)
-    return required, preferred
+    """The required and preferred lines of a posting, under any of the usual headings: app/posting.py."""
+    from app import posting
+    req, pref, _ = posting.requirement_lines(description)
+    return [l for l in req if 1 <= len(l.split()) <= 60], [l for l in pref if 1 <= len(l.split()) <= 60]

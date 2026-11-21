@@ -229,3 +229,4 @@ def test_assisted_apply_plan_review_and_approval(page: Page):
     expect(plan).to_contain_text("v2 · approved")
     expect(plan).to_contain_text("python scripts/apply_greenhouse.py --application 1")
     expect(page.locator("#apps-list select").first).to_have_value("ready_for_review")
+

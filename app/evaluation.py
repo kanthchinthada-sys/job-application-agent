@@ -89,9 +89,13 @@ def run(llm: LLMClient, cases_path: Path = CASES, profile_path: Path = PROFILE, 
             row["cover_letter"] = {
                 "honesty_warnings": len(review.warnings),
                 "warnings": review.warnings,
+                "sentences_removed": len(review.removed),          # left out of the letter: not backed
+                "removed": review.removed,
                 "humanizer_score": review.humanizer.score if review.humanizer else None,
                 "revision_rounds": review.humanizer.revision_rounds if review.humanizer else 0,
-                "names_company_up_front": case["company"].lower() in body.split("\n\n")[0].lower(),
+                # "(fictional)" marks test data; it isn't part of the name a letter should use
+                "names_company_up_front": re.sub(r"\s*\(fictional\)", "", case["company"]).lower()
+                                          in body.split("\n\n")[0].lower(),
                 "signed_correctly": text.rstrip().endswith(profile.full_name),
                 "words": len(body.split()),
                 "seconds": round(time.perf_counter() - t1, 1),
@@ -114,6 +118,7 @@ def run(llm: LLMClient, cases_path: Path = CASES, profile_path: Path = PROFILE, 
         cl = [r["cover_letter"] for r in results]
         summary |= {
             "letters_with_zero_warnings": sum(1 for c in cl if c["honesty_warnings"] == 0),
+            "sentences_removed": sum(c.get("sentences_removed", 0) for c in cl),   # informational
             "avg_humanizer_score": avg([c["humanizer_score"] for c in cl]),
             "letters_structured_correctly": sum(1 for c in cl if c["names_company_up_front"] and c["signed_correctly"]),
         }
@@ -129,12 +134,12 @@ def prompts() -> dict[str, str]:
     return {
         "extraction": extraction.SYSTEM_PROMPT,
         "drafting": drafting.SYSTEM_PROMPT,
-        "resume_reword": tailoring.REWORD_SYSTEM,
-        "resume_summary": tailoring.CLAUSE_SYSTEM,
+        "resume_reword": tailoring.RESUME_SYSTEM,
+        "resume_summary": tailoring.RESUME_SYSTEM,
         "ai_match": ai_match.SYSTEM,
         "job_intake": job_intake.AI_SYSTEM,
-        "line_fit": linefit.FILL_SYSTEM,
         "task_cover_letter": drafting._task("cover_letter", ""),
+        "letter_repair": drafting.LETTER_REPAIR_SYSTEM,
         "task_screening_answer": drafting._task("screening_answer", "{question}"),
     }
 

@@ -18,7 +18,7 @@ from app import evidence as ev
 from app.bank import verified
 from app.schemas import BankRecord, JobOut, Profile
 
-METHOD = "bank_selection_v1"
+METHOD = "bank_selection_v2"
 
 ROLE_SIGNALS: dict[str, list[str]] = {
     "FDE": ["forward deployed", "forward deployment", "customer", "client", "implementation", "deploy", "integration",
@@ -31,6 +31,18 @@ ROLE_SIGNALS: dict[str, list[str]] = {
                    "performance reviews", "build a team", "grow the team"],
     "AI Test/Evaluation": ["llm", "machine learning", " ml ", "model", "evaluation", "prompt", "generative",
                            " ai ", "rag", "inference", "probabilistic"],
+    # other tech roles people apply for (from real postings): weighed the same way
+    "Software Developer": ["software engineer", "software developer", "developer", "backend", "back-end", "frontend",
+                           "front-end", "full stack", "full-stack", "web application", "api design", "microservices",
+                           "react", "typescript", "code reviews"],
+    "AI/ML Engineer": ["ai engineer", "ml engineer", "machine learning engineer", "llm", "rag", "agents", "agentic",
+                       "model training", "fine-tuning", "inference", "pytorch", "embeddings", "mcp", "evaluation"],
+    "DevOps/SRE": ["devops", "site reliability", " sre", "platform engineer", "infrastructure", "terraform",
+                   "kubernetes", "observability", "on-call", "slo", "incident", "ci/cd"],
+    "Data Engineer": ["data engineer", "data pipeline", "etl", "spark", "airflow", "dbt", "data warehouse",
+                      "snowflake", "databricks", "data model"],
+    "Solutions Engineer": ["solutions engineer", "solutions architect", "sales engineer", "pre-sales", "presales",
+                           "technical discovery", "proof of concept", "demo", "customer", "stakeholder"],
 }
 
 # Per-user rules live in the profile (profile.resume_settings): bullets per role, record priorities per role
@@ -58,7 +70,7 @@ FOCUS_THEMES: dict[str, tuple[str, ...]] = {
     "security": ("security", "authentication", "authorization", "oauth", "owasp", "vulnerability", "penetration",
                  "encryption", "compliance"),
 }
-MAX_PROJECT = {"default": 6, "FDE": 9, "AI Test/Evaluation": 10}
+MAX_PROJECT = {"default": 6, "FDE": 9, "AI Test/Evaluation": 10, "AI/ML Engineer": 10, "Solutions Engineer": 8}
 # The LLM work itself (not just tests that happen to use a fake model).
 AI_CORE = re.compile(r"\b(llm|llm-generated|language models?|ollama|prompts?|prompt-regression|adversarial|"
                      r"generated (claims|content|responses|requirements)|fabricated|metamorphic|paraphrased)\b",
@@ -67,6 +79,14 @@ AI_TERMS = re.compile(r"\b(llm|language models?|ollama|model|models|prompt|promp
                       r"claim|ai)\b", re.IGNORECASE)
 
 WEIGHT = {"required": 3.0, "responsibility": 1.5, "preferred": 1.2}
+# Requirements that are only soft skills ("clear communication", "take ownership") are real, but a recruiter
+# looks for hard proof first: they count for less and never decide which bullet leads a role.
+SOFT = re.compile(r"communicat|collaborat|stakeholder|ownership|ambigu|teamwork|team player|tradeoff|trade-off|"
+                  r"autonom|independ|curious|curiosity|mindset|proactive|interpersonal|present|written|verbal|"
+                  r"relationship|partner|empathy|adapt|fast-paced|self-starter|problem[- ]solving|detail|"
+                  r"tenacious|pragmatic|expectations|async|remote|culture|values|passion|growth|feedback|"
+                  r"high-trust|delivery-oriented|product-minded|ship|deliver", re.IGNORECASE)
+SOFT_FACTOR = 0.35
 DIRECT, TRANSFER = 1.0, 0.6
 
 
@@ -80,9 +100,12 @@ class Row(BaseModel):
     requirement: str
     kind: str
     selected_ids: list[str]
-    strength: str                 # direct | transferable | skills only | gap
+    strength: str                 # direct | partial | transferable | skills only | gap
+                                  # soft-skill lines: shown by example | not shown (never a gap)
     location: list[str]           # where in the resume: employer or project names
     not_found_parts: list[str] = []
+    found_parts: list[str] = []   # what of the line your records show
+    category: str = "technical"   # technical | soft skill | education
 
 
 class Plan(BaseModel):
@@ -98,6 +121,8 @@ class Plan(BaseModel):
     caveats: dict[str, str]                  # record ID -> context that must be kept
     eligibility: list[str]
     scores: dict[str, float] = {}            # record ID -> how much it matters for this job (for fitting the page)
+    family: str = "general"                  # role family read from the posting (scorecard.family)
+    why: dict[str, list[str]] = {}           # record ID -> what this role looks for that the bullet shows
 
 
 def _in_range(rid: str, spec: str) -> bool:
@@ -117,13 +142,38 @@ def classify(job: JobOut) -> tuple[list[str], dict[str, int]]:
     body = f" {job.description.lower()} "
     scores = {role: 3 * sum(title.count(s) for s in sig) + sum(body.count(s) for s in sig)
               for role, sig in ROLE_SIGNALS.items()}
-    if re.search(r"\b(manager|head of|director)\b", title):
+    # the job title names the role most reliably: a clear role phrase in it outweighs words in the description
+    title_roles = [
+        (r"\b(ai|ml|llm|model|genai)\b.*\b(test|qa|quality|evaluation|evals?)\b|\b(evaluation|evals) engineer",
+         "AI Test/Evaluation"),
+        (r"forward[- ]deployed|\bfde\b", "FDE"),
+        (r"\bsdet\b|engineer in test|test automation|automation (test )?engineer|\b(qa|quality|test) engineer", "Senior SDET"),
+        (r"site reliability|\bsre\b|devops|platform engineer|infrastructure engineer|cloud engineer", "DevOps/SRE"),
+        (r"data engineer|analytics engineer|etl", "Data Engineer"),
+        (r"\b(ai|ml|machine learning|llm|applied ai) (engineer|scientist|developer)\b|\bai/ml\b", "AI/ML Engineer"),
+        (r"solutions? (engineer|architect|consultant)|sales engineer|customer engineer", "Solutions Engineer"),
+        (r"\b(software|backend|back-end|frontend|front-end|full[- ]?stack|web|mobile) (engineer|developer)\b|"
+         r"\bdeveloper\b", "Software Developer"),
+    ]
+    for pattern, role in title_roles:
+        if re.search(pattern, title) and not (role == "Software Developer" and "in test" in title):
+            scores[role] += 30 if role == "AI Test/Evaluation" else 25
+    qa_title = re.search(r"\b(qa|quality|test|testing|sdet)\b", title)
+    if qa_title and re.search(r"\b(manager|head of|director)\b", title):
         scores["QA Manager"] += 6
-    if re.search(r"\blead\b", title):
+    if qa_title and re.search(r"\blead\b", title):
         scores["QA Lead"] += 6
     best = max(scores.values()) or 1
     types = [r for r, s in sorted(scores.items(), key=lambda kv: -kv[1]) if s >= 0.6 * best and s > 0]
     return types or ["Senior SDET"], scores
+
+
+_NOT_A_REQUIREMENT = re.compile(
+    r"salary|compensation|pay range|base pay|\bbonus\b|equity|benefits|pto\b|vacation|401k|insurance|"
+    r"this posting|new vacancy|hiring process|^(begin|start)\s|^develop (a |an )?(strong |deep |good )?understanding|"
+    r"^get to know|^learn\s|^meet\s|onboard|^you('ll| will) (learn|work alongside|join)\b|^you won'?t\b|"
+    r"application experience|accommodation|equal opportunity|\beeo\b|privacy|"
+    r"^(first|within|by|after)\s+\d+\s+days|^\d+\s+days|success outcomes|^what success looks like", re.IGNORECASE)
 
 
 def requirements(job: JobOut, profile: Profile) -> list[Requirement]:
@@ -135,12 +185,24 @@ def requirements(job: JobOut, profile: Profile) -> list[Requirement]:
     out: list[Requirement] = []
     for kind, lines in (("required", req), ("preferred", pref), ("responsibility", resp)):
         for line in lines:
+            if _NOT_A_REQUIREMENT.search(line) or (len(line.split()) <= 3 and not ev.requirement_parts(line, vocab)):
+                continue                  # pay, benefits, "First 30 Days", stray headings: not something to prove
             if kind != "responsibility" and re.search(r"authori[sz]ed to work|citizen|clearance|work permit|"
-                                                      r"eligible to work|relocat|travel", line, re.IGNORECASE):
+                                                      r"eligible to work|relocat|travel|english|french|bilingual|"
+                                                      r"language proficiency", line, re.IGNORECASE):
                 out.append(Requirement(text=line, kind="eligibility", parts=[]))
                 continue
             out.append(Requirement(text=line, kind=kind, parts=ev.requirement_parts(line, vocab)))
     return out
+
+
+def _is_soft(q: Requirement) -> bool:
+    """A line about personality or ways of working ("curiosity, initiative", "seller-doer mindset, client
+    relationships", "collaboration across time zones"): every part of it is a people skill, not a technical one."""
+    from app.vocabulary import is_people_skill
+    if q.parts:
+        return all(SOFT.search(p) or is_people_skill(p) for p in q.parts)
+    return bool(SOFT.search(q.text))
 
 
 def _words(text: str) -> set[str]:
@@ -148,8 +210,15 @@ def _words(text: str) -> set[str]:
 
 
 def plan(profile: Profile, job: JobOut) -> Plan:
+    from app import scorecard
+    fam = scorecard.family(job.title, job.description)
     role_types, role_scores = classify(job)
     reqs = requirements(job, profile)
+    soft = {qi for qi, q in enumerate(reqs) if _is_soft(q)}
+
+    def w(qi: int, part: str = "") -> float:
+        is_soft = qi in soft or bool(part and SOFT.search(part))
+        return WEIGHT.get(reqs[qi].kind, 1.0) * (SOFT_FACTOR if is_soft else 1.0)
     records = verified(profile)
     by_id = {r.id: r for r in records}
     vocab = ev.vocabulary(profile)
@@ -167,13 +236,16 @@ def plan(profile: Profile, job: JobOut) -> Plan:
 
     # Broad parts ("automation", "testing") appear in many records and say little: weigh each part by how
     # rare it is in your bank, so a precise match beats a generic one.
-    df: dict[tuple[int, str], int] = {}
+    # A part counts once per bullet however many requirement lines repeat it ("automation" can appear in a
+    # dozen lines of one posting), and by how rare it is across your bank.
+    part_df: dict[str, int] = {}
     for parts_by_q in hits.values():
-        for qi, parts in parts_by_q.items():
-            for part in parts:
-                df[(qi, part)] = df.get((qi, part), 0) + 1
+        for part in {p for parts in parts_by_q.values() for p in parts}:
+            part_df[part] = part_df.get(part, 0) + 1
     n = max(1, len(records))
-    rarity = {k: 1.0 / (1.0 + 4.0 * v / n) for k, v in df.items()}
+    part_rarity = {p: 1.0 / (1.0 + 4.0 * v / n) for p, v in part_df.items()}
+    rarity = {(qi, part): part_rarity[part] for parts_by_q in hits.values() for qi, parts in parts_by_q.items()
+              for part in parts}
 
     ai_job = bool(re.search(r"\b(ml|machine learning|llm|ai|model|models|generative|inference)\b",
                             f"{job.title} {job.description}", re.IGNORECASE))
@@ -201,9 +273,16 @@ def plan(profile: Profile, job: JobOut) -> Plan:
     design_job = bool(re.search(r"\b(system design|technical design|solution design|design reviews?|"
                                 r"solutions? architect|software architect)\b", job.description, re.IGNORECASE))
 
+    posting_low = f" {job.title} {job.description} ".lower()
+    role_pts = {r.id: scorecard.role_points(fam, r.text, posting_low) for r in records}
+    quality = {r.id: scorecard.strength(r.text) for r in records}
+    lead_role = next((e.company for e in profile.experience if re.search(r"\blead\b", e.title.lower())), None)
+
     def boost(rid: str) -> float:
         b = 0.0
         r = by_id.get(rid)
+        # what a hiring manager for this kind of role looks for first, and how convincing the bullet is
+        b += 0.6 * role_pts.get(rid, (0.0, []))[0] + 0.8 * quality.get(rid, 0.0)
         if r is not None and r.caveat and re.search(r"design", r.caveat, re.IGNORECASE) and not design_job:
             b -= 3.0                   # design-only work counts less unless the job is about design
         if r is not None:
@@ -216,13 +295,20 @@ def plan(profile: Profile, job: JobOut) -> Plan:
         return b
 
     def relevance(rid: str) -> float:
-        return sum(WEIGHT[reqs[qi].kind] * v * rarity[(qi, part)]
-                   for qi, parts in hits.get(rid, {}).items() for part, v in parts.items())
+        best: dict[str, float] = {}
+        for qi, parts in hits.get(rid, {}).items():
+            for part, v in parts.items():
+                best[part] = max(best.get(part, 0.0), w(qi, part) * v * part_rarity[part])
+        lines = len([qi for qi in hits.get(rid, {}) if qi not in soft])
+        return sum(best.values()) + 0.1 * lines
 
     def cap(r: BankRecord) -> int:
         if r.owner_kind == "project":
             return next((MAX_PROJECT[t] for t in role_types[:1] if t in MAX_PROJECT), MAX_PROJECT["default"])
-        return max_per_role[min(order.get(r.owner, 99), len(max_per_role) - 1)]
+        base = max_per_role[min(order.get(r.owner, 99), len(max_per_role) - 1)]
+        if fam.name in ("lead", "data_lead") and r.owner == lead_role:
+            base += 2                       # lead roles: your test-lead experience carries more of the story
+        return base
 
     # --- greedy selection for coverage --------------------------------------------------------------
     covered: dict[tuple[int, str], float] = {}
@@ -242,11 +328,16 @@ def plan(profile: Profile, job: JobOut) -> Plan:
         return None
 
     def gain(rid: str) -> float:
-        g = 0.0
+        best: dict[str, float] = {}
+        new_lines = 0
         for qi, parts in hits.get(rid, {}).items():
+            fresh = False
             for part, v in parts.items():
-                g += WEIGHT[reqs[qi].kind] * rarity[(qi, part)] * max(0.0, v - covered.get((qi, part), 0.0))
-        return g
+                add = w(qi, part) * part_rarity[part] * max(0.0, v - covered.get((qi, part), 0.0))
+                best[part] = max(best.get(part, 0.0), add)
+                fresh = fresh or add > 0
+            new_lines += fresh and qi not in soft
+        return sum(best.values()) + 0.15 * new_lines
 
     candidates = [r.id for r in records if r.id in hits]
     while True:
@@ -288,7 +379,7 @@ def plan(profile: Profile, job: JobOut) -> Plan:
             per_owner[r.owner] = per_owner.get(r.owner, 0) + 1
 
     # --- every role stays understandable: top up to a minimum, most relevant first ----------------------
-    project_min = 7 if ({"FDE", "AI Test/Evaluation"} & set(role_types[:2]) or ai_job) else 4
+    project_min = 7 if ({"FDE", "AI Test/Evaluation", "AI/ML Engineer"} & set(role_types[:2]) or ai_job) else 4
     places = dict(order)
     places.update({pr.name: None for pr in profile.projects})
     for company, idx in places.items():
@@ -346,7 +437,14 @@ def plan(profile: Profile, job: JobOut) -> Plan:
         r = by_id[rid]
         return 0 if (ai_job and r.owner_kind == "project" and AI_CORE.search(r.text)) else 1
 
-    for rid in sorted(chosen, key=lambda x: (core_first(x), -(relevance(x) + boost(x)), position[x])):
+    def must_direct(rid: str) -> int:       # direct evidence of a required qualification leads its role
+        # a specific match (a part that is not in a large share of your bullets) to a hard required line
+        return int(any(reqs[qi].kind == "required" and qi not in soft and not SOFT.search(part) and v == DIRECT
+                       and part_rarity[part] >= 0.5
+                       for qi, parts in hits.get(rid, {}).items() for part, v in parts.items()))
+
+    for rid in sorted(chosen, key=lambda x: (core_first(x), -(4 * must_direct(x) + relevance(x) + boost(x)),
+                                             position[x])):
         selected.setdefault(by_id[rid].owner, []).append(rid)
 
     # --- report --------------------------------------------------------------------------------
@@ -367,16 +465,29 @@ def plan(profile: Profile, job: JobOut) -> Plan:
                                                        for e in profile.education], vocab)
             degree_found = any(ev._degree_part(f) for f in m.found)
             rows.append(Row(requirement=q.text, kind=q.kind, selected_ids=[],
-                            strength="direct" if degree_found else "gap",
+                            strength="direct" if degree_found else "gap", category="education",
                             location=["Education"] if degree_found else [], not_found_parts=[]))
             if not degree_found:
                 gaps.append(q.text)
             continue
+        found: set[str] = set()
+        if qi in soft:
+            # people skills: your records can show them by example, but they are never a gap to close
+            found = {p for rid in ids for p in hits[rid][qi]}
+            rows.append(Row(requirement=q.text, kind=q.kind, selected_ids=ids, category="soft skill",
+                            strength="shown by example" if ids else "not shown",
+                            location=sorted({by_id[i].owner for i in ids}), found_parts=sorted(found),
+                            not_found_parts=[p for p in q.parts if p not in found][:6]))
+            continue
         if ids:
             direct = any(v == DIRECT for rid in ids for v in hits[rid][qi].values())
-            strength = "direct" if direct else "transferable"
             found = {p for rid in ids for p in hits[rid][qi]}
             missing = [p for p in q.parts if p not in found and not any(p in f or f in p for f in found)]
+            # "direct" only when your records show most of what the line asks for, not one word of it
+            hard = [p for p in q.parts if not SOFT.search(p)]
+            hard_found = [p for p in hard if p not in missing]
+            strength = ("direct" if not hard or len(hard_found) * 2 >= len(hard) else "partial") if direct \
+                else "transferable"
         else:
             m = ev.match_requirement(profile, q.text, [("skills", skills_text)], vocab)
             strength = "skills only" if m.found else "gap"
@@ -384,7 +495,8 @@ def plan(profile: Profile, job: JobOut) -> Plan:
             if strength == "gap" and q.kind != "responsibility":
                 gaps.append(q.text)
         rows.append(Row(requirement=q.text, kind=q.kind, selected_ids=ids, strength=strength,
-                        location=sorted({by_id[i].owner for i in ids}), not_found_parts=missing[:6]))
+                        location=sorted({by_id[i].owner for i in ids}), not_found_parts=missing[:6],
+                        found_parts=sorted(found) if ids else [p for p in q.parts if p not in missing]))
         for r in unverified:
             if ev.match_requirement(profile, q.text, [(r.id, r.text)], vocab).found and not ids:
                 excluded.append(f"{r.id} ({r.status.replace('_', ' ')}): could show '{q.text[:60]}'")
@@ -394,6 +506,7 @@ def plan(profile: Profile, job: JobOut) -> Plan:
         gaps=gaps, excluded_by_status=list(dict.fromkeys(excluded)), removed_as_duplicate=duplicates,
         caveats={rid: by_id[rid].caveat for rid in chosen if by_id[rid].caveat}, eligibility=eligibility,
         scores={rid: round(relevance(rid) + boost(rid) + (50 if rid in protected else 0), 2) for rid in chosen},
+        family=fam.name, why={rid: role_pts[rid][1] for rid in chosen if role_pts.get(rid, (0, []))[1]},
     )
 
 
@@ -471,6 +584,11 @@ ROLE_HEADINGS: dict[str, tuple[str, ...]] = {
     "Senior SDET": ("automation", "testing", "cloud", "ci/cd", "language", "performance", "framework"),
     "QA Lead": ("leadership", "quality", "automation", "testing", "delivery", "tools", "ci/cd"),
     "QA Manager": ("leadership", "quality", "delivery", "tools", "automation", "testing"),
+    "Software Developer": ("language", "framework", "cloud", "ci/cd", "data", "automation", "tools"),
+    "AI/ML Engineer": ("ai", "language", "data", "cloud", "automation", "observability"),
+    "DevOps/SRE": ("cloud", "ci/cd", "observability", "monitoring", "automation", "language"),
+    "Data Engineer": ("data", "language", "cloud", "ci/cd", "automation"),
+    "Solutions Engineer": ("integration", "ai", "cloud", "leadership", "language", "delivery"),
 }
 MAX_HEADINGS = 7
 

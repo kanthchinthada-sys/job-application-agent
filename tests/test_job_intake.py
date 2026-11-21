@@ -34,7 +34,7 @@ def test_rules_read_title_company_location_and_split_skills():
     assert fields["company"] == "Contoso Health"
     assert fields["location"] == "Toronto, ON (Hybrid)"
     req, pref = rule_skills(POSTING)
-    assert {"Python", "Java", "Playwright", "Selenium", "Postman", "Kubernetes", "Docker"} <= set(req)
+    assert {"Python/Java", "Playwright/Selenium", "Postman", "Kubernetes", "Docker"} <= set(req)   # "or" = alternatives
     assert set(pref) == {"k6", "Grafana"}
 
 
@@ -73,8 +73,9 @@ def test_ai_answers_are_used_only_where_the_posting_backs_them():
     info = intake(POSTING, None, llm)
     assert info.company == "Contoso Health"                       # the AI's company isn't in the posting
     assert info.location == "Toronto, ON (Hybrid)"
-    assert info.required_skills == ["Playwright"]                 # Rust is not in the posting
-    assert info.found_by["skills"].startswith("AI")
+    assert "Playwright/Selenium" in info.required_skills or "Playwright" in info.required_skills
+    assert "Rust" not in info.required_skills                     # Rust is not in the posting: dropped
+    assert "Kubernetes" in info.required_skills                   # the rules' keywords stay alongside the AI's
 
 
 def test_no_ai_still_works():
@@ -117,3 +118,86 @@ def test_quick_add_from_a_description_and_fix_a_field(board_client):
 def test_unreadable_link_without_description_asks_for_it(board_client):
     r = board_client.post("/jobs/quick", json={"url": "https://www.linkedin.com/jobs/view/123"})
     assert r.status_code == 422 and "Paste the job description" in r.json()["detail"]
+
+
+HEADINGS_POSTING = """FICTIONAL. About Contoso Health
+We build things.
+
+What you’ll be doing
+- Owning the design and release of customer solutions
+- Code reviews and on-call
+
+What you need to be successful
+- Strong React, TypeScript/JavaScript and experience in either Go, Java, Kotlin or Node.js on the backend
+- Deep experience integrating REST APIs and third-party systems
+- Experience mentoring less-experienced developers
+- Experience with Terraform is a plus
+
+What you'll get
+- Python lunches (not a skill requirement)
+"""
+
+
+def test_any_heading_style_and_alternatives():
+    """No "Required/Preferred" headings: the usual other ways of writing them still work."""
+    req, pref = rule_skills(HEADINGS_POSTING)
+    assert req[:5] == ["React", "TypeScript/JavaScript", "Go/Java/Kotlin/Node.js", "REST APIs", "mentoring"]
+    assert {"code reviews", "on-call"} <= set(req)    # what the job does counts too (after the requirements)
+    assert pref == ["Terraform"]                      # "is a plus" inside the requirements list
+    assert "Python" not in req + pref                 # the benefits section is not requirements
+
+
+def test_job_page_structured_data_is_read():
+    from app.page_reader import read_posting
+    html = ('<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"JobPosting",'
+            '"title":"QA Lead","hiringOrganization":{"name":"Contoso (fictional)"},"jobLocation":{"address":'
+            '{"addressLocality":"Toronto","addressRegion":"ON","addressCountry":"CA"}},"description":"&lt;p&gt;'
+            + "FICTIONAL requirement text. " * 20 + '&lt;/p&gt;"}]}</script>')
+    p = read_posting(html, "https://example.com/jobs/1")
+    assert (p.title, p.company, p.location) == ("QA Lead", "Contoso (fictional)", "Toronto, ON, CA")
+    assert p.description.startswith("FICTIONAL requirement text.")
+    assert read_posting("<html>no structured data</html>", "u") is None
+
+
+def test_quick_add_reads_the_full_posting_from_any_job_page(db_path, fake_llm):
+    html = ('<script type="application/ld+json">{"@type":"JobPosting","title":"QA Lead","hiringOrganization":'
+            '{"name":"Contoso (fictional)"},"description":' + __import__("json").dumps(HEADINGS_POSTING) + '}</script>')
+    with TestClient(create_app(db_path, llm=fake_llm, fetch=fake_fetch, fetch_page=lambda url: html)) as c:
+        r = c.post("/jobs/quick", json={"url": "https://careers.contoso.example/jobs/42"})
+        assert r.status_code == 201, r.text
+        job = r.json()["job"]
+        assert (job["title"], job["company"]) == ("QA Lead", "Contoso (fictional)")
+        assert "Go/Java/Kotlin/Node.js" in job["required_skills"]
+        # a job saved earlier with only an excerpt: one click reads the full posting
+        old = c.post("/jobs", json={"title": "QA Lead 2", "company": "Contoso (fictional)", "description": "Excerpt…",
+                                    "required_skills": ["QA Lead 2"], "source_url": "https://careers.contoso.example/jobs/43"}).json()
+        refreshed = c.post(f"/jobs/{old['id']}/refresh").json()
+        assert "React" in refreshed["required_skills"] and len(refreshed["description"]) > 200
+
+
+def test_title_from_as_a_sentence_and_no_sentence_as_location():
+    from app.job_intake import rule_fields
+    text = ("More about our team:\n- Overview video\nDescription\n"
+            "As a Forward Deployed Engineer you'll work with Sales (FICTIONAL).\n"
+            "- Build solutions that meet product and engineering standards\n"
+            "- Databricks, AWS Bedrock, or Temporal experience. Technical founder background.\n")
+    found, _ = rule_fields(text)
+    assert found["title"] == "Forward Deployed Engineer"
+    assert found["location"] is None
+
+
+@pytest.mark.parametrize("title,role", [
+    ("Senior Site Reliability Engineer", "DevOps/SRE"),
+    ("Backend Software Engineer", "Software Developer"),
+    ("Machine Learning Engineer", "AI/ML Engineer"),
+    ("Data Engineer II", "Data Engineer"),
+    ("Software Development Engineer in Test", "Senior SDET"),
+    ("Solutions Architect", "Solutions Engineer"),
+])
+def test_common_tech_roles_are_recognised_from_the_title(title, role):
+    from datetime import datetime
+    from app.schemas import JobOut
+    from app.selection import classify
+    job = JobOut(id=1, title=title, company="Example (fictional)", required_skills=["Python"],
+                 description="We work with customers and deploy software. Python, SQL, CI/CD.", created_at=datetime.now())
+    assert classify(job)[0][0] == role

@@ -183,10 +183,55 @@ def test_find_jobs_then_apply_prepares_everything(ui: Page):
     expect(found).to_contain_text("Senior QA Engineer")
     expect(found).not_to_contain_text("Berlin GmbH")                 # another country
     expect(ui.get_by_test_id("sources")).to_contain_text("Remotive")
+    expect(ui.get_by_test_id("elsewhere").get_by_role("link", name="hiring.cafe")).to_be_visible()
     row = found.locator("tr", has_text="Globex (fictional)")
     with ui.context.expect_page() as employer_page:                    # the employer's page opens in a new tab
         row.get_by_role("button", name="Apply").click()
     assert employer_page.value.url.startswith("https://remotive.example/jobs/2") or employer_page.value
+    row.get_by_role("link", name="Materials").click()                 # leave while it's being prepared
+    materials = ui.get_by_test_id("materials")
+    expect(materials).to_contain_text("QA Engineer")
+    expect(materials.get_by_test_id("doc-cover_letter")).to_be_visible(timeout=30000)   # appears by itself
+    expect(materials).to_contain_text("Open latest resume")
+    ui.get_by_role("link", name="Find jobs").click()                  # come back: the search is still there
+    row = ui.get_by_test_id("found-jobs").locator("tr", has_text="Globex (fictional)")
     expect(row).to_contain_text("Ready: resume and cover letter prepared", timeout=20000)
-    row.get_by_role("link", name="Materials").click()
-    expect(ui.get_by_test_id("materials")).to_contain_text("QA Engineer")
+    expect(ui.get_by_label("Job title")).to_have_value("QA Engineer")
+
+
+def test_a_gap_you_really_have_can_be_added_and_used(ui: Page):
+    save_profile(ui)
+    import_job(ui)
+    job = ui.request.get("/jobs").json()[0]          # the job also asks for a tool the profile doesn't name
+    ui.request.patch(f"/jobs/{job['id']}", data={"required_skills": job["required_skills"] + ["TestRail"]})
+    ui.get_by_role("button", name="Track application").click()
+    ui.get_by_role("button", name="Tailor resume").click()
+    gaps = ui.get_by_test_id("gaps")
+    expect(gaps).to_contain_text("TestRail", timeout=10_000)
+    gaps.get_by_role("button", name="I have this").last.click()                 # the one next to TestRail
+    form = ui.get_by_test_id("gap-form")
+    expect(form).to_contain_text("Where did you use TestRail?")
+    form.locator("textarea").fill("Kept regression cases and release runs in TestRail (FICTIONAL TEST DATA).")
+    form.get_by_role("button", name="Add to my profile").click()
+    expect(ui.get_by_test_id("materials")).to_contain_text("Added to your profile: TestRail")
+    ui.get_by_role("button", name="Tailor the resume again").click()
+    expect(ui.get_by_test_id("materials")).to_contain_text("v2", timeout=10_000)
+    expect(ui.get_by_test_id("gaps")).not_to_contain_text("TestRail")
+
+
+def test_private_review_shows_with_an_experience_bank_and_never_prints(ui: Page):
+    import json as _json
+    from tests.test_bank import SDET_JOB, with_bank
+    ui.request.put("/profile", data=_json.loads(with_bank().model_dump_json()))
+    job = ui.request.post("/jobs", data={"title": "Senior SDET", "company": "Example (fictional)",
+                                         "description": SDET_JOB.description, "required_skills": ["Java"],
+                                         "allow_duplicate": True}).json()
+    app = ui.request.post("/applications", data={"job_id": job["id"]}).json()
+    ui.goto(f"/ui/#/applications/{app['id']}")
+    ui.get_by_role("button", name="Tailor resume").click()
+    review = ui.get_by_test_id("private-review")
+    expect(review).to_contain_text("Private review", timeout=10_000)
+    expect(review).to_contain_text("Java test automation")
+    expect(review).to_contain_text("direct")
+    ui.get_by_role("link", name="Open latest resume (save as PDF)").click()
+    expect(ui.locator("body")).not_to_contain_text("Private review")

@@ -130,6 +130,13 @@ export interface BankImportReport {
 }
 export interface ReportRow {
   requirement: string; kind: string; selected_ids: string[]; strength: string; location: string[]; not_found_parts: string[];
+  found_parts?: string[]; category?: 'technical' | 'soft skill' | 'education';
+}
+/** One requirement of the posting, the records that meet it, and where each one printed on the resume. */
+export interface RequirementMapRow {
+  requirement: string; kind: string; category: 'technical' | 'soft skill' | 'education'; strength: string;
+  found: string[]; missing: string[]; where: string | null;
+  on_resume: { id: string; owner: string; where: string; line: string }[]; more_on_resume?: number; not_printed: string[];
 }
 export interface TailoringReport {
   role_types: string[]; selected: Record<string, string[]>; rows: ReportRow[]; gaps: string[];
@@ -149,13 +156,18 @@ export interface CountryOption { code: string; name: string; adzuna: boolean; }
 export interface FoundJob {
   source: string; title: string; company: string; location: string; posted: string | null; url: string;
   description: string; description_is_excerpt: boolean; remote: boolean; where: string; title_match: string;
-  already_added_job_id: number | null;
+  already_added_job_id: number | null; credit_url?: string;
 }
+export interface ElsewhereLink { name: string; url: string; note: string; }
 export interface SourceStatus { name: string; ok: boolean; found: number; kept: number; note: string; }
 export interface SearchResult {
   method: string; query: string; country: string; date_from: string; date_to: string;
-  results: FoundJob[]; sources: SourceStatus[];
+  results: FoundJob[]; sources: SourceStatus[]; elsewhere?: ElsewhereLink[];
 }
 export interface ApplyResult {
-  job_id: number; application_id: number; apply_url: string; new_job: boolean; new_application: boolean; notes: string[];
+  job_id: number; application_id: number; preparation: string; apply_url: string; new_job: boolean; new_application: boolean; notes: string[];
+}
+export interface Preparation {
+  application_id: number; state: 'idle' | 'queued' | 'running' | 'done' | 'failed'; step: string | null;
+  message: string; done_steps: string[]; started_at: string | null; finished_at: string | null;
 }

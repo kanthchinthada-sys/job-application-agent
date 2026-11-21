@@ -37,6 +37,11 @@ def fake_fetch(url):
     return _board_fetch(url)
 
 
+def _no_pages(url):
+    """No network: job web pages can't be read in the browser tests (the app then asks you to paste)."""
+    raise ConnectionError("no network in tests")
+
+
 class E2EFakeLLM:
     """Answers by the JSON schema the app asks for, like a well-behaved model would."""
 
@@ -53,6 +58,9 @@ class E2EFakeLLM:
             return {"bullets": []}
         if "sentences" in props:
             return {"sentences": []}
+        if "fixes" in props:          # the cover letter's repair: rewrite the flagged sentence from a real fact
+            return {"fixes": [{"id": "S1", "text": "I worked with customer support to reproduce production issues "
+                                                   "using Docker containers.", "fact_ids": ["F5"]}], "additions": []}
         if "text" in props:
             if "PROBLEMS FOUND" in user:
                 return {"text": "I build pytest suites for a payments API used by three internal teams. When a run "
@@ -79,7 +87,7 @@ def fake_llm_e2e():
 @pytest.fixture
 def server(tmp_path, fake_llm_e2e):
     """A fresh app per test: no state leaks between tests."""
-    app = create_app(tmp_path / "e2e.db", llm=fake_llm_e2e, fetch=fake_fetch)
+    app = create_app(tmp_path / "e2e.db", llm=fake_llm_e2e, fetch=fake_fetch, fetch_page=_no_pages)
     port = _free_port()
     srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=srv.run, daemon=True)

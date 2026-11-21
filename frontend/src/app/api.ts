@@ -4,7 +4,7 @@ import { firstValueFrom, Observable } from 'rxjs';
 
 import {
   AIMatchReport, AiStatus, Application, BankImportReport, BankRecord, RecordStatus, BoardSearch, Doc, ExtractedSkills, Handoff, Health, ImportedJob, Job, MatchReport,
-  NewJob, QuickAdd, ResumeImport, CountryOption, SearchResult, FoundJob, ApplyResult,
+  NewJob, QuickAdd, ResumeImport, CountryOption, SearchResult, FoundJob, ApplyResult, Preparation,
 } from './models';
 
 /** An error from the backend, with its readable message (FastAPI's "detail"). */
@@ -51,6 +51,7 @@ export class Api {
   quickAddJob(body: { url: string | null; description: string | null; allow_duplicate?: boolean }) {
     return this.call(this.http.post<QuickAdd>('/jobs/quick', body));
   }
+  refreshJob(id: number) { return this.call(this.http.post<Job>(`/jobs/${id}/refresh`, {})); }
   updateJob(id: number, body: Record<string, unknown>) { return this.call(this.http.patch<Job>(`/jobs/${id}`, body)); }
   extractSkills(description: string) {
     return this.call(this.http.post<ExtractedSkills>('/ai/extract-skills', { description }));
@@ -84,6 +85,8 @@ export class Api {
   saveVersion(docId: number, content: string) {
     return this.call(this.http.post<Doc>(`/documents/${docId}/versions`, { content }));
   }
+  preparation(appId: number) { return this.call(this.http.get<Preparation>(`/applications/${appId}/prepare`)); }
+  prepare(appId: number) { return this.call(this.http.post<Preparation>(`/applications/${appId}/prepare`, {})); }
   handoff(appId: number) { return this.call(this.http.get<Handoff>(`/applications/${appId}/handoff`)); }
 
   plan(appId: number) { return this.call(this.http.get<Doc>(`/applications/${appId}/submission/plan`)); }
@@ -101,6 +104,10 @@ export class Api {
   }
   readResume(body: { filename?: string; content_base64?: string; text?: string }) {
     return this.call(this.http.post<ResumeImport>('/profile/resume', body));
+  }
+  addExperienceLine(body: { owner: string; text: string; skill?: string }) {
+    return this.call(this.http.post<{ id: string | null; owner: string; skill_added: boolean }>(
+      '/profile/experience-line', body));
   }
   saveProfile(profile: unknown) { return this.call(this.http.put('/profile', profile)); }
   exampleProfile() { return this.call(this.http.get<Record<string, unknown>>('/static/fictional_profile.json')); }

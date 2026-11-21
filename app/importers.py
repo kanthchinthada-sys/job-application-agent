@@ -242,3 +242,45 @@ def list_board(link: BoardLink, fetch: Fetcher = http_fetch) -> list[BoardPostin
                              posted=_posted(j.get("publishedAt")))
                 for j in data.get("jobs", []) if j.get("isListed", True)]
     raise ImportError_(f"Unknown provider {link.provider}")
+
+
+# ---------------------------------------------------------------------------
+# Full posting for a job found elsewhere (e.g. an Adzuna excerpt)
+# ---------------------------------------------------------------------------
+
+_COMPANY_SUFFIX = re.compile(r"\b(inc|incorporated|ltd|limited|llc|corp|corporation|co|gmbh|ag|sa|plc|technologies|"
+                             r"technology|labs|canada|usa|group|holdings)\b\.?", re.IGNORECASE)
+
+
+def company_slugs(company: str) -> list[str]:
+    """Likely career-board names for a company: "Staffbase GmbH" -> ["staffbase"], "Acme Labs" -> ["acmelabs", "acme-labs", "acme"]."""
+    base = _COMPANY_SUFFIX.sub(" ", company.lower())
+    words = re.findall(r"[a-z0-9]+", base)
+    if not words:
+        return []
+    out = ["".join(words), "-".join(words), words[0]]
+    return [x for x in dict.fromkeys(out) if len(x) >= 3][:3]
+
+
+def find_on_company_board(company: str, title: str, fetch: Fetcher = http_fetch,
+                          same_title: Callable[[str, str], bool] | None = None) -> ImportedJob | None:
+    """The same job on the company's own Greenhouse / Lever / Ashby board (public APIs), with its full description.
+
+    Only an exact-enough title match counts (both ways), so a different job is never taken by mistake."""
+    from app.preferences import check_title
+    same_title = same_title or (lambda a, b: check_title(a, [b])[0] == "strong" and check_title(b, [a])[0] == "strong")
+    for slug in company_slugs(company):
+        for provider in ("greenhouse", "lever", "ashby"):
+            link = BoardLink(provider=provider, board=slug, job_id=None)
+            try:
+                postings = list_board(link, fetch)
+            except Exception:                       # no such board, or not reachable: try the next one
+                continue
+            hit = next((p for p in postings if same_title(p.title, title)), None)
+            if hit is None:
+                continue
+            try:
+                return fetch_job(parse_link(hit.source_url), fetch)
+            except Exception:
+                return None
+    return None

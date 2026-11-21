@@ -31,6 +31,9 @@ class LLMClient(Protocol):
     def status(self) -> dict: ...
 
 
+MAX_OUTPUT_TOKENS = 2400   # the longest real answer (a whole tailored resume) is about 1,300 tokens
+
+
 class OllamaClient:
     def __init__(self, base_url: str = DEFAULT_OLLAMA_URL, model: str = DEFAULT_OLLAMA_MODEL, timeout: float = 180.0):
         self.base_url = base_url.rstrip("/")
@@ -51,7 +54,10 @@ class OllamaClient:
             "format": schema,      # Ollama constrains the answer to this JSON schema
             "stream": False,
             "think": False,        # skip qwen3's long "Thinking..." text
-            "options": {"temperature": 0},  # as repeatable as possible
+            "options": {"temperature": 0,   # as repeatable as possible
+                        "num_ctx": 8192,    # room for posting + profile; the default can silently cut prompts
+                        "num_predict": MAX_OUTPUT_TOKENS},   # a runaway answer ends as invalid, not a timeout
+            "keep_alive": "30m",            # keep the model loaded between calls: no reload wait
         }
         try:
             response = httpx.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout)
@@ -64,7 +70,11 @@ class OllamaClient:
         if response.status_code != 200:
             raise LLMUnavailableError(f"Ollama returned HTTP {response.status_code}: {response.text[:300]}")
         try:
-            return json.loads(response.json()["message"]["content"])
+            data = response.json()
+            from app import metrics          # tokens and model-load time, as Ollama reports them
+            metrics.note_usage(input_tokens=data.get("prompt_eval_count"), output_tokens=data.get("eval_count"),
+                               load_seconds=round((data.get("load_duration") or 0) / 1e9, 3))
+            return json.loads(data["message"]["content"])
         except (KeyError, ValueError) as exc:
             raise LLMOutputError("The model's answer was not valid JSON.") from exc
 

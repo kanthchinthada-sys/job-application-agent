@@ -38,7 +38,7 @@ UI_DIR = PROJECT_ROOT / "frontend" / "dist" / "frontend" / "browser"   # output 
 
 def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=None,
                password: str | None = None, log_dir: Path | None = None, log_level: str = "INFO",
-               ui_dir: Path | None = None) -> FastAPI:
+               ui_dir: Path | None = None, fetch_page=None, request_api=None) -> FastAPI:
     """``password``: turn on sign-in (main.py passes APP_PASSWORD). ``log_dir``: also log to a file.
     ``ui_dir``: the built Angular screen (default frontend/dist/frontend/browser), served at /ui/ if it exists."""
     db_path = Path(db_path) if db_path else get_db_path()
@@ -49,6 +49,11 @@ def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=
     app.state.db_path = db_path
     app.state.llm = llm or OllamaClient.from_env()  # tests pass a fake client
     app.state.fetch = fetch or importers.http_fetch  # tests pass a fake fetcher (no network)
+    from app import page_reader
+    app.state.fetch_page = fetch_page or page_reader.http_get_page   # job web pages (HTML); faked in tests
+    app.state.request_api = request_api                # keyed job-search APIs (JSearch, Jooble); faked in tests
+    from app.preparation import Preparer
+    app.state.preparer = Preparer(db_path, app.state.llm)   # resume + cover letter in the background
 
     @app.exception_handler(NotFoundError)
     async def not_found_handler(request: Request, exc: NotFoundError):

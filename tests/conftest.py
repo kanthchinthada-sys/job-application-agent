@@ -53,6 +53,16 @@ def no_browser_page_measuring(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_web_pages(monkeypatch):
+    """Tests never read real job pages: an app built without a fake page fetcher gets one that is 'offline'."""
+    from app import page_reader
+
+    def offline(url):
+        raise ConnectionError("no network in tests")
+    monkeypatch.setattr(page_reader, "http_get_page", offline)
+
+
+@pytest.fixture(autouse=True)
 def no_min_letter_length(monkeypatch):
     """Most tests use tiny fake letters; the length rule has its own test."""
     from app import drafting

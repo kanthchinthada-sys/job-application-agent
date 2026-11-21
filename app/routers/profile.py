@@ -114,3 +114,47 @@ def set_status(record_id: str, body: StatusUpdate, conn: Conn):
             repository.save_profile(conn, profile.model_copy(update={"experience_bank": bank_records}))
             return bank_records[i]
     raise NotFoundError(f"No experience record {record_id}.")
+
+
+class ExperienceLine(BaseModel):
+    owner: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=600)]
+    skill: Annotated[str, StringConstraints(strip_whitespace=True, max_length=60)] | None = None
+
+
+class ExperienceLineOut(BaseModel):
+    id: str | None              # experience-bank record id, when you have a bank
+    owner: str
+    skill_added: bool
+
+
+@router.post("/experience-line", response_model=ExperienceLineOut, status_code=201,
+             responses={404: {"description": "No profile, or no such employer/project"}})
+def add_experience_line(body: ExperienceLine, conn: Conn):
+    """Add one line of real experience in your own words (e.g. for a skill a job asks for that your profile
+    doesn't mention yet). It is marked verified because you wrote it; the next resume can use it."""
+    profile = _profile_only(repository.get_profile(conn))
+    exp = next((e for e in profile.experience if e.company.lower() == body.owner.lower()), None)
+    proj = next((p for p in profile.projects if p.name.lower() == body.owner.lower()), None)
+    if not exp and not proj:
+        raise NotFoundError(f"No employer or project called {body.owner!r} in your profile.")
+    owner = exp.company if exp else proj.name
+    update: dict = {}
+    rid = None
+    if profile.experience_bank:
+        used = {r.id for r in profile.experience_bank}
+        rid = next(f"ME{n:02d}" for n in range(1, 1000) if f"ME{n:02d}" not in used)
+        update["experience_bank"] = list(profile.experience_bank) + [BankRecord(
+            id=rid, text=body.text, owner=owner, owner_kind="experience" if exp else "project",
+            group=body.skill or None, status="verified", status_note="Added by you")]
+    elif exp:
+        update["experience"] = [e.model_copy(update={"highlights": e.highlights + [body.text]}) if e is exp else e
+                                for e in profile.experience]
+    else:
+        update["projects"] = [p.model_copy(update={"highlights": p.highlights + [body.text]}) if p is proj else p
+                              for p in profile.projects]
+    skill_added = bool(body.skill) and body.skill.lower() not in {s.lower() for s in profile.skills}
+    if skill_added:
+        update["skills"] = list(profile.skills) + [body.skill]
+    repository.save_profile(conn, Profile(**profile.model_copy(update=update).model_dump()))
+    return ExperienceLineOut(id=rid, owner=owner, skill_added=skill_added)

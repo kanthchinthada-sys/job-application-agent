@@ -3,13 +3,9 @@ import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 
 import { Api, ApiError } from '../api';
-import { CountryOption, FoundJob, SearchResult } from '../models';
+import { daysAgo, FindJobsState, today } from '../find-jobs-state';
+import { CountryOption, FoundJob } from '../models';
 import { Msg, MsgBox } from '../ui';
-
-interface RowState { step: string; kind: 'info' | 'ok' | 'bad'; applicationId?: number; }
-
-const iso = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-const daysAgo = (n: number) => iso(new Date(Date.now() - n * 86400000));
 
 /** Find jobs: three filters (title, country, date range) across free job sources; Apply prepares everything. */
 @Component({
@@ -36,6 +32,7 @@ const daysAgo = (n: number) => iso(new Date(Date.now() - n * 86400000));
       <button class="primary" type="button" [disabled]="busy()" (click)="search()">{{ busy() ? 'Searching…' : 'Search' }}</button>
       <app-msg [msg]="msg()" />
       @if (result(); as r) {
+        @if (!msg()) { <p class="small">{{ r.results.length }} jobs found in {{ r.country }}, posted {{ r.date_from }} to {{ r.date_to }}.</p> }
         <p class="small muted" data-testid="sources">
           @for (s of r.sources; track s.name) {
             <span [class.warn-text]="!s.ok" [title]="s.note">{{ s.name }}: {{ s.ok ? s.kept + ' kept of ' + s.found : 'off' }}</span>
@@ -44,6 +41,13 @@ const daysAgo = (n: number) => iso(new Date(Date.now() - n * 86400000));
         </p>
         @for (s of r.sources; track s.name) {
           @if (!s.ok && s.note) { <div class="small muted">{{ s.name }}: {{ s.note }}</div> }
+        }
+        @if (r.elsewhere?.length) {
+          <p class="small" data-testid="elsewhere">Search elsewhere (opens the same search on sites the app can't read):
+            @for (l of r.elsewhere; track l.name) {
+              <a class="button tight" [href]="l.url" target="_blank" rel="noopener" [title]="l.note">{{ l.name }}</a>
+            }
+          </p>
         }
       }
     </div>
@@ -60,12 +64,17 @@ const daysAgo = (n: number) => iso(new Date(Date.now() - n * 86400000));
                     <span class="muted small">{{ j.company }}</span></td>
                   <td class="small">{{ j.where }}</td>
                   <td class="small">{{ j.posted || '—' }}</td>
-                  <td class="small muted">{{ j.source }}</td>
+                  <td class="small muted">
+                    @if (j.credit_url) { via <a [href]="j.credit_url" target="_blank" rel="noopener">{{ j.source }}</a> }
+                    @else { {{ j.source }} }</td>
                   <td>
-                    @if (state()[j.url]; as s) {
+                    @if (state.rows()[j.url]; as s) {
                       <div class="small" [class.good]="s.kind === 'ok'" [class.warn-text]="s.kind === 'bad'">{{ s.step }}</div>
                       @if (s.applicationId) {
                         <a class="small" [routerLink]="['/applications', s.applicationId]">Materials</a>
+                      }
+                      @if (s.applyUrl) {
+                        · <a class="small" [href]="s.applyUrl" target="_blank" rel="noopener">Employer's apply page</a>
                       }
                     } @else {
                       <button class="primary tight" type="button" (click)="apply(j)">{{ j.already_added_job_id ? 'Apply (saved)' : 'Apply' }}</button>
@@ -76,7 +85,8 @@ const daysAgo = (n: number) => iso(new Date(Date.now() - n * 86400000));
             </tbody>
           </table>
           <p class="small muted">Apply opens the employer's page in a new tab and prepares your tailored resume and cover
-            letter here. You submit the application yourself; nothing is sent for you.</p>
+            letter in the background (you can keep browsing; open Materials to see them). You submit the application
+            yourself; nothing is sent for you.</p>
         } @else {
           <p class="muted">No jobs matched. Try a shorter title, a longer date range, or another country.</p>
         }
@@ -86,21 +96,22 @@ const daysAgo = (n: number) => iso(new Date(Date.now() - n * 86400000));
 })
 export class FindJobsPage implements OnInit {
   private api = inject(Api);
+  /** Filters, results and Apply progress live in a shared service, so they survive leaving this tab. */
+  protected readonly state = inject(FindJobsState);
 
-  protected readonly today = iso(new Date());
+  protected readonly today = today();
   protected readonly presets = [
     { label: 'Last 24 hours', days: 1 }, { label: '3 days', days: 3 }, { label: '7 days', days: 7 },
     { label: '14 days', days: 14 }, { label: '30 days', days: 30 },
   ];
-  protected readonly title = signal('');
-  protected readonly country = signal('CA');
-  protected readonly dateFrom = signal(daysAgo(6));
-  protected readonly dateTo = signal(iso(new Date()));
+  protected readonly title = this.state.title;
+  protected readonly country = this.state.country;
+  protected readonly dateFrom = this.state.dateFrom;
+  protected readonly dateTo = this.state.dateTo;
+  protected readonly result = this.state.result;
   protected readonly countries = signal<CountryOption[]>([]);
   protected readonly busy = signal(false);
   protected readonly msg = signal<Msg | null>(null);
-  protected readonly result = signal<SearchResult | null>(null);
-  protected readonly state = signal<Record<string, RowState>>({});
 
   async ngOnInit() {
     try {
@@ -109,10 +120,12 @@ export class FindJobsPage implements OnInit {
     } catch (e) {
       this.msg.set({ kind: 'bad', text: (e as ApiError).message });
     }
-    try {   // start from your own target role and country, if your profile has them
+    if (this.result()) return;                      // coming back: keep your last search as it was
+    if (!this.country()) this.country.set('CA');
+    try {   // a first visit starts from your own target role and country, if your profile has them
       const p = await this.api.profile() as any;
       const role = p?.preferences?.target_roles?.[0];
-      if (role) this.title.set(role);
+      if (role && !this.title()) this.title.set(role);
       const locs: string[] = (p?.preferences?.locations ?? []).map((x: string) => x.toLowerCase());
       const hit = this.countries().find(c => locs.some(l => l.includes(c.name.toLowerCase())));
       if (hit) this.country.set(hit.code);
@@ -121,7 +134,7 @@ export class FindJobsPage implements OnInit {
 
   preset(days: number) {
     this.dateFrom.set(daysAgo(days - 1));
-    this.dateTo.set(iso(new Date()));
+    this.dateTo.set(today());
   }
 
   async search() {
@@ -131,7 +144,7 @@ export class FindJobsPage implements OnInit {
     }
     this.busy.set(true);
     this.result.set(null);
-    this.state.set({});
+    this.state.rows.set({});
     this.msg.set({ kind: 'info', text: 'Searching the job sources…' });
     try {
       const r = await this.api.searchJobs({ title: this.title().trim(), country: this.country(),
@@ -145,28 +158,8 @@ export class FindJobsPage implements OnInit {
     }
   }
 
-  private setRow(url: string, s: RowState) {
-    this.state.update(all => ({ ...all, [url]: s }));
-  }
-
-  async apply(j: FoundJob) {
+  apply(j: FoundJob) {
     window.open(j.url, '_blank', 'noopener');          // must happen right in the click, or the browser blocks it
-    this.setRow(j.url, { step: 'Saving the job…', kind: 'info' });
-    let appId: number | undefined;
-    try {
-      const r = await this.api.applyFound(j);
-      appId = r.application_id;
-      this.setRow(j.url, { step: 'Tailoring your resume…', kind: 'info', applicationId: appId });
-      await this.api.draft(appId, { kind: 'resume' });
-      this.setRow(j.url, { step: 'Writing your cover letter…', kind: 'info', applicationId: appId });
-      await this.api.draft(appId, { kind: 'cover_letter' });
-      const note = r.notes.length ? ` ${r.notes[0]}` : '';
-      this.setRow(j.url, { step: `Ready: resume and cover letter prepared.${note}`, kind: 'ok', applicationId: appId });
-    } catch (e) {
-      const err = e as ApiError;
-      const text = err.status === 404 && /profile/i.test(err.message)
-        ? 'Saved. Add your profile (Profile tab) to prepare the resume and cover letter.' : err.message;
-      this.setRow(j.url, { step: text, kind: 'bad', applicationId: appId });
-    }
+    this.state.apply(j);
   }
 }
