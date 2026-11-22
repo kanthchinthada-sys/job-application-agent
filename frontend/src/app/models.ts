@@ -56,10 +56,17 @@ export interface Application {
   submission_confirmation: string | null;
   history: HistoryEvent[];
   allowed_next: string[];
+  documents_ready?: string[];        // document kinds saved for it: generation, not the application status
+  last_activity?: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface AiStatus { reachable: boolean; model: string; model_available: boolean; }
-export interface Health { status: string; password_protection: boolean; }
+export interface Health { status: string; password_protection: boolean; accounts?: boolean; }
+export interface Me {
+  username: string | null; accounts: boolean; local_data_available: boolean;
+}
 
 export interface PreferenceCheck {
   title_match: string; title_reason: string;
@@ -135,7 +142,7 @@ export interface ReportRow {
 /** One requirement of the posting, the records that meet it, and where each one printed on the resume. */
 export interface RequirementMapRow {
   requirement: string; kind: string; category: 'technical' | 'soft skill' | 'education'; strength: string;
-  found: string[]; missing: string[]; where: string | null;
+  found: string[]; missing: string[]; where: string | null; found_elsewhere?: Record<string, string>;
   on_resume: { id: string; owner: string; where: string; line: string }[]; more_on_resume?: number; not_printed: string[];
 }
 export interface TailoringReport {
@@ -146,10 +153,17 @@ export interface TailoringReport {
 export const pretty = (s: string) => s.replaceAll('_', ' ');
 export const splitSkills = (s: string) => s.split(',').map(x => x.trim()).filter(Boolean);
 
-export interface ResumeImport { method: string; profile: any; warnings: string[]; sections_found: string[]; }
+export interface ResumeImport { method: string; profile: any; warnings: string[]; sections_found: string[]; uncertain?: string[]; }
 export interface Intake {
   method: string; title: string; company: string; location: string | null;
   required_skills: string[]; preferred_skills: string[]; found_by: Record<string, string>; notes: string[];
+  review?: string[];                  // fields to check: missing, or read an uncertain way
+  ai_state?: 'not_needed' | 'pending' | 'done' | 'failed' | 'off';
+}
+/** GET /jobs/{id}/intake: the local AI's background step after adding a job. */
+export interface IntakeStatus {
+  ai_state: 'not_needed' | 'pending' | 'done' | 'failed' | 'off'; review: string[]; notes: string[];
+  found_by: Record<string, string>; applied: string[]; kept: string[]; job: Job;
 }
 export interface QuickAdd { job: Job; intake: Intake; }
 export interface CountryOption { code: string; name: string; adzuna: boolean; }
@@ -168,6 +182,17 @@ export interface ApplyResult {
   job_id: number; application_id: number; preparation: string; apply_url: string; new_job: boolean; new_application: boolean; notes: string[];
 }
 export interface Preparation {
-  application_id: number; state: 'idle' | 'queued' | 'running' | 'done' | 'failed'; step: string | null;
+  application_id: number; state: 'idle' | 'queued' | 'running' | 'done' | 'failed' | 'interrupted'; step: string | null;
   message: string; done_steps: string[]; started_at: string | null; finished_at: string | null;
+  failed_steps?: Record<string, string>; steps?: string[];
 }
+export interface RequirementEvidence {
+  requirement: string; kind: string; category: 'technical' | 'soft skill' | 'education'; strength: string;
+  evidence: string; found: string[]; missing: string[]; found_elsewhere: Record<string, string>;
+  records: { id: string; owner: string; text: string }[];
+}
+export interface Requirements { job_id: number; role_types: string[]; has_bank: boolean; eligibility: string[];
+  rows: RequirementEvidence[]; }
+export interface ActivityItem { at: string; type: 'status' | 'document'; text: string; note?: string | null;
+  document_id?: number; kind?: string; version?: number; source?: string; }
+export interface Activity { application_id: number; notes: string; notes_saved_at: string; items: ActivityItem[]; }

@@ -109,12 +109,70 @@ def find_evidence(profile_text: str, keyword: str) -> str | None:
 
 
 def _alternatives(keyword: str) -> list[str]:
-    """ "Python/Java/Scala/go" -> its alternatives. Not for fixed pairs like CI/CD or names with spaces."""
+    """ "Python/Java/Scala/go", "Playwright or Selenium", "Jenkins, GitHub Actions, or GitLab CI" -> the options
+    (any one of them meets the requirement). Not for fixed pairs like CI/CD, and not for "and/or" lists."""
     k = keyword.strip()
-    if "/" not in k or re.search(r"\b(ci/cd|a/b|tcp/ip|i/o|ui/ux|24/7)\b", k.lower()):
+    low = k.lower()
+    if re.search(r"\b(ci/cd|a/b|tcp/ip|i/o|ui/ux|24/7|and/or)\b", low):
+        k = re.sub(r"(?i)\b(ci/cd|a/b|tcp/ip|i/o|ui/ux|24/7)\b", lambda m: m.group(0).replace("/", "\0"), k)
+    if "/" not in k and not re.search(r"\bor\b", k, re.IGNORECASE):
         return []
-    alts = [a.strip() for a in k.split("/") if a.strip()]
-    return alts if len(alts) > 1 and all(len(a) > 1 for a in alts) else []
+    alts = [a.strip(" ,.").replace("\0", "/") for a in re.split(r"/|,?\s+or\s+|,", k, flags=re.IGNORECASE)]
+    alts = [a for a in alts if a]
+    return alts if len(alts) > 1 and all(len(a) > 1 and len(a.split()) <= 4 for a in alts) else []
+
+
+_SKILL_FILLER = re.compile(r"^(strong|solid|advanced|good|basic|hands-on|proven)\s+|"
+                           r"\s+(skills?|experience|knowledge|proficiency|expertise|background)$", re.IGNORECASE)
+
+
+def skill_terms(keyword: str) -> list[str]:
+    """The skill name(s) a keyword stands for, as they could be listed on a resume: "SQL skills" -> ["SQL"],
+    "Playwright or Selenium" -> ["Playwright", "Selenium"]. Never the either-or phrase itself."""
+    out = []
+    for term in _alternatives(keyword) or [keyword.strip()]:
+        prev = None
+        while prev != term:
+            prev, term = term, _SKILL_FILLER.sub("", term).strip()
+        if term and term not in out:
+            out.append(term)
+    return out
+
+
+def is_named_tool(term: str) -> bool:
+    """A specific product, language or platform ("AWS", "Playwright"), not a practice ("API testing")."""
+    from app.vocabulary import TOOLS, canonical
+    from app.selection import KNOWN_TECH
+    names = ({t.lower() for t in TOOLS} | {t.lower() for t in KNOWN_TECH}) - _PRACTICES
+    return term.lower() in names or canonical(term).lower() in names
+
+
+# listed with the tools, but practices that equivalent work shows (Jenkins pipelines are CI/CD)
+_PRACTICES = {"ci/cd", "rest apis", "rest api", "microservices", "graphql", "websockets", "html", "css"}
+
+
+def supports_skill(profile_text: str, term: str, profile=None) -> str | None:
+    """The profile text that lets this skill be LISTED on the resume, or None.
+
+    A named tool needs the tool itself (or a spelling of it) in your profile: related experience is never enough
+    (Kubernetes does not show AWS, Selenium does not show Playwright). A practice ("API testing") may also be shown
+    by the equivalent work listed in EQUIVALENTS (e.g. REST Assured tests). An either-or phrase ("Playwright or
+    Selenium") is never a skill you can list: list the option you have."""
+    if len(skill_terms(term)) > 1 or skill_terms(term) != [term.strip()]:
+        return None
+    if is_named_tool(term):
+        phrases = list(_forms(term)) + [alias for alias, target in ALIASES.items() if target == normalize(term)]
+        texts = [profile_text]
+        if profile is not None:
+            texts += [r.text for r in getattr(profile, "experience_bank", []) if r.status == "verified"]
+        for text in texts:
+            for sentence in re.split(r"(?<=[.!?;])\s+|\n", text):
+                s = " ".join(sentence.lower().split())
+                if any(_contains(s, p) for p in phrases):
+                    return sentence.strip()
+        return None
+    found = profile_evidence(profile_text, term, profile)
+    return found if found and "(related:" not in found else None
 
 
 def resume_has(resume_text: str, keyword: str, profile=None) -> bool:

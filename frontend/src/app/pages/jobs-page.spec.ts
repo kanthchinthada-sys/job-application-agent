@@ -16,17 +16,18 @@ const MATCH = {
 };
 
 describe('JobsPage', () => {
-  it('lists jobs with their application status or a Track button', async () => {
+  it('gives each saved job its next action: Prepare application, or Open application', async () => {
     const { http } = setup([JobsPage]);
     const fixture = TestBed.createComponent(JobsPage);
     fixture.detectChanges();
     http.expectOne('/jobs').flush([JOB, { ...JOB, id: 2, title: 'SDET' }]);
-    http.expectOne('/applications').flush([APP]);
+    http.expectOne('/applications').flush([{ ...APP, documents_ready: ['resume'] }]);
     await settle(fixture);
     const page = text(fixture);
-    expect(page).toContain('QA Lead');
-    expect(page).toContain('preparing');              // job 1 is tracked
-    expect(page).toContain('Track application');      // job 2 is not
+    expect(page).toContain('Saved jobs');
+    expect(page).toContain('Open application');         // job 1 has one
+    expect(page).toContain('Prepare application');      // job 2 doesn't
+    expect(page).toContain('Resume ready');
   });
 
   it('shows the keyword match with evidence for the job in the URL', async () => {
@@ -82,14 +83,14 @@ describe('JobsPage', () => {
     expect(text(fixture)).toContain('Save your profile first');
   });
 
-  it('starts tracking an application', async () => {
+  it('Prepare application starts it and opens its workspace', async () => {
     const { http } = setup([JobsPage]);
     const fixture = TestBed.createComponent(JobsPage);
     fixture.detectChanges();
     http.expectOne('/jobs').flush([JOB]);
     http.expectOne('/applications').flush([]);
     await settle(fixture);
-    button(fixture, 'Track application').click();
+    button(fixture, 'Prepare application').click();
     const req = http.expectOne('/applications');
     expect(req.request.body).toEqual({ job_id: 1 });
     req.flush(APP);

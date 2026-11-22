@@ -33,14 +33,16 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
       @if (r.ats; as ats) {
         @if (noSkills(ats)) {
           <div class="ats" data-testid="ats-unavailable">
-            <b>ATS keyword match: not available</b>
+            <b>Job-description keyword coverage: not available</b>
             <div class="small muted">This job lists no skills to compare: usually only a short excerpt of the posting
               was available. Paste the full description above, then tailor the resume again.</div>
           </div>
         } @else {
         <div class="ats">
-          <b>ATS keyword match: {{ ats.score }}%</b>
-          <span class="muted small">(was {{ ats.score_before }}% before adding keywords; {{ ats.max_honest_score }}% is the most your real experience supports for this job)</span>
+          <b>Job-description keyword coverage: {{ ats.score }}%</b>
+          <span class="muted small">(the share of the job description's technical keywords that appear on the resume, as an
+            applicant tracking system scans it; was {{ ats.score_before }}% before adding keywords; {{ ats.max_honest_score }}%
+            is the most your real experience supports)</span>
           @if (ats.matched?.length) {
             <details data-testid="ats-matched"><summary>Found on the resume ({{ ats.matched.length }}): where an ATS sees each one</summary>
               @for (k of ats.matched; track k.keyword) {
@@ -82,7 +84,7 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
                 <label class="small">One line, in your words: what you did with {{ k }}
                   <textarea rows="2" [(ngModel)]="gapText" name="gapText"
                     [placeholder]="'e.g. Managed regression test cases and release runs in ' + k + '.'"></textarea></label>
-                <button class="primary" type="button" [disabled]="gapText.trim().length < 10 || !gapOwner"
+                <button class="secondary" type="button" [disabled]="gapText.trim().length < 10 || !gapOwner"
                   (click)="saveGap(k)">Add to my profile</button>
                 <button class="secondary" type="button" (click)="gap.set(null)">Cancel</button>
                 @if (gapMsg(); as m) { <div class="msg bad">{{ m }}</div> }
@@ -90,7 +92,7 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
             }
             @if (addedGaps().length) {
               <div class="msg ok">Added to your profile: {{ addedGaps().join(', ') }}.
-                <button class="primary" type="button" [disabled]="working()" (click)="regenerate.emit()">
+                <button class="secondary" type="button" [disabled]="working()" (click)="regenerate.emit()">
                   {{ working() ? 'Tailoring the resume…' : 'Tailor the resume again' }}</button></div>
             }
           } @else {
@@ -124,8 +126,23 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
       @if (t.summary_themes?.length) {
         <p class="small muted">What this job emphasises (summary focus): {{ t.summary_themes.join(', ') }}</p>
       }
+      @if (summaryChecks(r).length) {
+        <details class="small" data-testid="summary-checks"><summary>Summary sentences checked against your records
+          ({{ summaryChecks(r).length }} changed)</summary>
+          @for (c of summaryChecks(r); track $index) {
+            <div class="claim">
+              @if (c.ai_sentence) { <div class="muted"><b>The AI wrote:</b> “{{ c.ai_sentence }}”</div> }
+              @for (u of c.unsupported; track $index) { <div class="warn-text">Unsupported {{ u.kind }}: {{ u.detail }}</div> }
+              @for (x of c.style; track $index) { <div class="muted">{{ x }}</div> }
+              @if (c.trimmed) { <div class="muted">Filler removed: “{{ c.trimmed }}”</div> }
+              @if (c.records?.length) { <div class="muted">From your records: {{ recordIds(c.records) }}</div> }
+              <div><b>{{ c.decision }}</b>{{ c.sentence ? ': “' + c.sentence + '”' : '' }}</div>
+            </div>
+          }
+        </details>
+      }
       <p class="small"><b>Skills order:</b> {{ cv.skills.slice(0, 12).join(' · ') }}{{ cv.skills.length > 12 ? ' …' : '' }}</p>
-      <a class="button" [href]="'/applications/' + d.application_id + '/resume'">Open latest resume (save as PDF)</a>
+      <a class="button" [href]="'/documents/' + d.id + '/print'" target="_blank" rel="noopener">Print / Save as PDF</a>
       @if (changed().length) {
         <details open><summary>Reworded bullets ({{ changed().length }}): compare with your original</summary>
           @for (c of changed(); track $index) {
@@ -188,6 +205,9 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
                         [class.warn]="row.strength === 'partial' || row.strength === 'transferable'"
                         [class.bad]="row.strength === 'gap' || row.strength === 'skills only'">{{ row.strength }}</span>
                     @if (row.found.length) { <div class="good">✓ {{ row.found.join(', ') }}</div> }
+                    @for (x of elsewhere(row); track x.part) {
+                      <div class="good" data-testid="found-elsewhere">✓ {{ x.part }} <span class="muted">({{ x.where }})</span></div>
+                    }
                     @if (row.missing.length && row.category === 'technical') { <div class="warn-text">✗ {{ row.missing.join(', ') }}</div> }</td>
                   <td>
                     @if (row.where) { {{ row.where }} }
@@ -238,6 +258,15 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
   `,
 })
 export class ResumeCard {
+  /** Summary sentences the checks changed (written without AI, trimmed or left out), with the reasons. */
+  protected recordIds(records: { id: string }[]): string {
+    return records.map(r => r.id).join(', ');
+  }
+
+  protected summaryChecks(r: any): any[] {
+    return (r?.summary_checks ?? []).filter((c: any) => c.decision !== 'kept' || c.trimmed || c.unsupported?.length);
+  }
+
   /** All versions of the resume, newest first. */
   readonly versions = input.required<Doc[]>();
 
@@ -254,6 +283,11 @@ export class ResumeCard {
 
   private bullets(keep: (b: Bullet) => boolean) {
     return this.resume().experience.flatMap(role => role.bullets.filter(keep).map(b => ({ company: role.company, b })));
+  }
+
+  /** Skills of a requirement shown by your skills list or by bank records that are not on this resume. */
+  protected elsewhere(row: any): { part: string; where: string }[] {
+    return Object.entries(row.found_elsewhere ?? {}).map(([part, where]) => ({ part, where: String(where) }));
   }
 
   /** "5 met · 2 partly · 1 gap · 3 soft skills" for the requirements map's heading. */

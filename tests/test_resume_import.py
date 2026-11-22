@@ -99,3 +99,41 @@ def test_upload_endpoint_returns_a_preview_and_saves_nothing(client):
     assert client.get("/profile").status_code == 404                     # nothing saved
     assert client.post("/profile/resume", json={}).status_code == 422
     assert client.post("/profile/resume", json={"filename": "old.doc", "content_base64": "AAAA"}).status_code == 409
+
+
+LAYOUT_TITLE_FIRST = """Jordan Sample
+jordan.sample@example.com | Toronto, ON
+SUMMARY
+Fictional QA automation engineer.
+SKILLS
+Python, pytest, Selenium
+EXPERIENCE
+Senior QA Engineer, Example Corp (fictional), Toronto, ON | Jan 2021 - Present
+- Built a fictional pytest suite for a payments API.
+QA Analyst, Sample Systems (fictional), Ottawa, ON | Jun 2018 - Dec 2020
+- Wrote fictional regression tests using Selenium and Java.
+"""
+
+
+def test_title_company_location_then_dates_on_one_line():
+    roles = parse_resume(LAYOUT_TITLE_FIRST).profile["experience"]
+    assert [(r["title"], r["company"], r.get("location"), r["start_date"], r.get("end_date")) for r in roles] == [
+        ("Senior QA Engineer", "Example Corp (fictional)", "Toronto, ON", "2021-01", None),
+        ("QA Analyst", "Sample Systems (fictional)", "Ottawa, ON", "2018-06", "2020-12")]
+
+
+def test_company_line_then_title_with_dates():
+    text = LAYOUT_TITLE_FIRST.replace(
+        "Senior QA Engineer, Example Corp (fictional), Toronto, ON | Jan 2021 - Present",
+        "Example Corp (fictional), Toronto, ON\nSenior QA Engineer, Jan 2021 - Present")
+    first = parse_resume(text).profile["experience"][0]
+    assert (first["title"], first["company"], first.get("location")) == ("Senior QA Engineer", "Example Corp (fictional)",
+                                                                         "Toronto, ON")
+    assert len(first["highlights"]) == 1
+
+
+def test_fields_the_reader_is_unsure_about_are_flagged_for_review():
+    r = parse_resume("Jordan Sample\nEXPERIENCE\nContoso Health (fictional) | 2020 - 2022\n• Did fictional work.\n")
+    assert "experience.0.title" in r.uncertain                     # no title found: "Role" is a placeholder
+    assert "contact.email" in r.uncertain and "skills" in r.uncertain
+    assert parse_resume(LAYOUT_TITLE_FIRST).uncertain == []

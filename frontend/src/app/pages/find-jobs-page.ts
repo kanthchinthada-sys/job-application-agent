@@ -24,15 +24,14 @@ import { Msg, MsgBox } from '../ui';
         <div><label for="f-from">Posted from</label><input id="f-from" type="date" [(ngModel)]="dateFrom" [max]="today"></div>
         <div><label for="f-to">to</label><input id="f-to" type="date" [(ngModel)]="dateTo" [max]="today"></div>
       </div>
-      <div class="small">
+      <div class="seg" role="group" aria-label="Posted within" style="margin-top:10px; flex-wrap:wrap">
         @for (p of presets; track p.days) {
-          <button class="secondary tight" type="button" (click)="preset(p.days)">{{ p.label }}</button>
+          <button type="button" [attr.aria-pressed]="activePreset() === p.days" (click)="preset(p.days)">{{ p.label }}</button>
         }
       </div>
-      <button class="primary" type="button" [disabled]="busy()" (click)="search()">{{ busy() ? 'Searching…' : 'Search' }}</button>
-      <app-msg [msg]="msg()" />
+      <div><button class="primary" type="button" [disabled]="busy()" (click)="search()">{{ busy() ? 'Searching…' : 'Search' }}</button></div>
+      @if (msg()?.kind === 'bad') { <app-msg [msg]="msg()" /> }
       @if (result(); as r) {
-        @if (!msg()) { <p class="small">{{ r.results.length }} jobs found in {{ r.country }}, posted {{ r.date_from }} to {{ r.date_to }}.</p> }
         <p class="small muted" data-testid="sources">
           @for (s of r.sources; track s.name) {
             <span [class.warn-text]="!s.ok" [title]="s.note">{{ s.name }}: {{ s.ok ? s.kept + ' kept of ' + s.found : 'off' }}</span>
@@ -52,8 +51,12 @@ import { Msg, MsgBox } from '../ui';
       }
     </div>
 
+    @if (busy()) {
+      <div class="card empty" data-testid="searching"><span class="spinner"></span> Searching the job sources… this takes a few seconds.</div>
+    }
     @if (result(); as r) {
       <div class="card" data-testid="found-jobs">
+        <p class="small" style="margin-top:0"><b>{{ r.results.length }} jobs</b> in {{ r.country }}, posted {{ r.date_from }} to {{ r.date_to }}.</p>
         @if (r.results.length) {
           <table>
             <thead><tr><th>Job</th><th>Where</th><th>Posted</th><th>Source</th><th></th></tr></thead>
@@ -71,13 +74,13 @@ import { Msg, MsgBox } from '../ui';
                     @if (state.rows()[j.url]; as s) {
                       <div class="small" [class.good]="s.kind === 'ok'" [class.warn-text]="s.kind === 'bad'">{{ s.step }}</div>
                       @if (s.applicationId) {
-                        <a class="small" [routerLink]="['/applications', s.applicationId]">Materials</a>
+                        <a class="small" [routerLink]="['/applications', s.applicationId]">Open application</a>
                       }
                       @if (s.applyUrl) {
                         · <a class="small" [href]="s.applyUrl" target="_blank" rel="noopener">Employer's apply page</a>
                       }
                     } @else {
-                      <button class="primary tight" type="button" (click)="apply(j)">{{ j.already_added_job_id ? 'Apply (saved)' : 'Apply' }}</button>
+                      <button class="secondary tight" type="button" (click)="apply(j)">{{ j.already_added_job_id ? 'Apply (saved)' : 'Apply' }}</button>
                     }
                   </td>
                 </tr>
@@ -88,7 +91,7 @@ import { Msg, MsgBox } from '../ui';
             letter in the background (you can keep browsing; open Materials to see them). You submit the application
             yourself; nothing is sent for you.</p>
         } @else {
-          <p class="muted">No jobs matched. Try a shorter title, a longer date range, or another country.</p>
+          <div class="empty" data-testid="no-results">No jobs matched. Try a shorter title, a longer date range, or another country.</div>
         }
       </div>
     }
@@ -130,6 +133,12 @@ export class FindJobsPage implements OnInit {
       const hit = this.countries().find(c => locs.some(l => l.includes(c.name.toLowerCase())));
       if (hit) this.country.set(hit.code);
     } catch { /* no profile yet: fine */ }
+  }
+
+  /** The preset that matches the chosen dates (highlighted), or null for custom dates. */
+  protected activePreset(): number | null {
+    if (this.dateTo() !== today()) return null;
+    return this.presets.find(p => this.dateFrom() === daysAgo(p.days - 1))?.days ?? null;
   }
 
   preset(days: number) {

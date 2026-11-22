@@ -167,7 +167,8 @@ NOT_TECH = re.compile(
     r"time zones?|disciplines|culture|values|in[\s-]person|interactions?|hybrid|remote|on[\s-]?site|office|"
     r"policy|policies|adjustments?|accommodat\w*|recruit\w*|hiring|interview\w*|application experience|"
     r"diversity|inclusion|benefits?|salary|travel|relocat\w*|visa|sponsorship|clearance|degree|"
-    r"years?|fast[\s-]paced|detail[\s-]oriented|organi[sz]ed|independen\w*|autonom\w*|adaptab\w*|flexib\w*)\b",
+    r"years?|fast[\s-]paced|detail[\s-]oriented|organi[sz]ed|independen\w*|autonom\w*|adaptab\w*|flexib\w*|"
+    r"analytic(al)?|problem[\s-]?solv\w*|critical[\s-]thinking|preferred|asset|plus)\b",
     re.IGNORECASE)
 # words that make an unknown term technical ("Jupyter notebooks", "data engineering workflows")
 _TECH_WORD = re.compile(

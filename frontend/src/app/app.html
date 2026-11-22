@@ -1,17 +1,38 @@
-<header>
-  <h1>Job Application Agent</h1>
-  <nav aria-label="Main">
-    <a routerLink="/find" routerLinkActive="active">Find jobs</a>
-    <a routerLink="/jobs" routerLinkActive="active">Jobs</a>
-    <a routerLink="/add" routerLinkActive="active">Add job</a>
-    <a routerLink="/applications" routerLinkActive="active">Applications</a>
-    <a routerLink="/profile" routerLinkActive="active">Profile</a>
-  </nav>
-  <span class="ai" data-testid="ai-status">{{ aiText() }}</span>
-  @if (passwordOn()) {
-    <button class="secondary" type="button" (click)="signOut()">Sign out</button>
-  }
-</header>
-<main>
-  <router-outlet />
-</main>
+<div class="shell" [class.nav-open]="navOpen()">
+  <aside class="sidebar" aria-label="Main navigation">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">JA</span><span class="brand-name">Job Application Agent</span>
+      <button class="menu-toggle" type="button" [attr.aria-expanded]="navOpen()" aria-controls="main-nav"
+              (click)="navOpen.set(!navOpen())">{{ navOpen() ? 'Close' : 'Menu' }}</button>
+    </div>
+    <nav id="main-nav" aria-label="Main" (click)="navOpen.set(false)">
+      <a routerLink="/find" routerLinkActive="active">Find jobs</a>
+      <a routerLink="/jobs" routerLinkActive="active">Saved jobs</a>
+      <a routerLink="/applications" routerLinkActive="active">Applications</a>
+      <a routerLink="/profile" routerLinkActive="active">Profile</a>
+      <a class="add-job" routerLink="/add" routerLinkActive="active" data-testid="add-job-action">+ Add job</a>
+    </nav>
+  </aside>
+  <div class="main-col">
+    <header class="topbar">
+      <details class="ai-status" data-testid="ai-status-box">
+        <summary data-testid="ai-status"><span class="dot" [class.on]="ai()?.ok" [class.off]="ai() && !ai()!.ok"></span>{{ aiText() }}</summary>
+        <div class="popover small">
+          <div><b>Model:</b> <span data-testid="ai-model">{{ ai()?.model || 'unknown' }}</span></div>
+          <div><b>Status:</b> {{ aiDetail() }}</div>
+          @if (!ai()?.ok) {
+            <div class="muted">To reconnect: open the Ollama app (or run <code>ollama serve</code>), and if the model
+              is missing run <code>ollama pull {{ ai()?.model || 'qwen3:8b' }}</code>. Your saved jobs and documents stay
+              available meanwhile.</div>
+          }
+          <button class="secondary tight" type="button" (click)="checkAi()">Check again</button>
+        </div>
+      </details>
+      <span class="user" data-testid="user">{{ username() || 'Local workspace' }}</span>
+      @if (signOutShown()) {
+        <button class="secondary tight" type="button" (click)="signOut()">Sign out</button>
+      }
+    </header>
+    <main><router-outlet /></main>
+  </div>
+</div>

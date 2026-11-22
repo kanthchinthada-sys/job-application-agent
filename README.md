@@ -12,20 +12,100 @@ Architecture: [docs/architecture.md](docs/architecture.md).
 
 ## Quick start
 
-You need **Python 3.11+** and **Node.js 20+** (for the screen). Ollama is optional (AI features).
+Prerequisites: **Python 3.12+**, **Node.js 20+** (builds the screen once) and, for AI features,
+[Ollama](https://ollama.com) with `ollama pull qwen3:8b`. Then one command:
 
-**macOS:** double-click `start.command` (first run: `chmod +x start.command` in a terminal). It sets everything up
-the first time, then opens <http://127.0.0.1:8000/ui/>.
+| Platform | Command (in the project folder) |
+|---|---|
+| macOS / Linux | `./start.sh` (on macOS you can also double-click `start.command`) |
+| Windows (PowerShell) | `powershell -ExecutionPolicy Bypass -File .\start.ps1` |
 
-**Any system:**
+The first run installs everything; later runs start in seconds. It prints the address to open:
+**<http://127.0.0.1:8000/ui/>**. Signed out, you see **Sign in** and **Create account**; a new account lands on a
+short profile setup (upload a resume or paste your experience).
+
+Manual start, any system:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python -m playwright install chromium                    # optional: measures printed pages exactly
 (cd frontend && npm ci && npm run build)
 uvicorn app.main:app                                     # then open http://127.0.0.1:8000/ui/
 ```
+
+### Accounts and your existing data
+
+Each account has its own workspace: profile, jobs, notes, documents and downloads live in their own database
+file (`data/users/<id>/job_agent.db`), so one account can never open another's documents, not even by typing a
+download link. Passwords are hashed (scrypt); sessions survive a restart.
+
+Data from before accounts existed (`data/job_agent.db`) is never moved on its own, and registering first grants
+nothing. Only the installation owner can take it over: the server writes a one-time **setup code** to
+`data/owner-setup-code.txt` (readable only by your user) and prints it in its console. Sign in, open **Profile →
+Bring in existing local data**, enter the code: the data is copied into your (empty) workspace once, and the
+original file is kept as a backup. Other accounts only learn that such data exists, never what is in it, and
+start empty. `JOB_AGENT_ACCOUNTS=off` in `.env` goes back to one shared workspace.
+
+Everything personal is scoped to the signed-in account on the server: saved jobs, applications, statuses and
+notes, profile, skills and experience bank, preferences, documents, edits and versions, generation progress and
+downloads. Background generation runs per workspace; signing out never shows a run's progress or results to the
+next account, and the browser forgets this account's saved searches and filters on sign-out. Job-search API keys
+in `.env` are installation settings shared by everyone on this computer, not per-account credentials.
+
+If the app stops while documents are being generated, the application shows **Interrupted** for each unfinished
+document with its own **Retry**; finished documents and your saved edits stay. (Stopping the server with Ctrl+C
+waits for a running document to finish first.)
+
+If the local AI is not running, the header shows "AI offline" with how to reconnect it (open Ollama or run
+`ollama serve`, then `ollama pull <model>`); saved jobs and documents stay available.
+
+### The screen
+
+- **Sidebar:** Find jobs, Saved jobs, Applications, Profile, and **+ Add job** from anywhere. The header shows your
+  account and the local AI status (the model name is under the status details).
+- **Add job:** "Import from link" (Greenhouse, Lever, Ashby and most job pages) or "Paste description". A failed
+  import keeps the link and offers pasting at once. Pasting a posting you already saved shows that job and its
+  application instead of a duplicate.
+- **Saved jobs:** each row says what's next: **Prepare application** (opens its workspace) or **Open application**.
+- **Applications:** compact rows (job, company, status, documents ready, last activity), searchable by title or
+  company and filterable by status; your search and scroll position come back when you return. The application
+  status (Applied…) is separate from document generation (Resume ready…).
+- **Each application has its own page** (`/ui/#/applications/<id>`), with three tabs:
+  - **Documents:** one **Generate resume and cover letter** button (or one document at a time) with real progress
+    per document. A refresh or a double click never starts a second run; a failed document can be retried alone.
+    Each document opens with its preview and actions first (Edit, Copy, Download .txt, **Print / Save as PDF**,
+    Save edits as new version), a compact summary beside it (page fit, **job-description keyword coverage**, what
+    needs your attention, and claims left out because your profile doesn't support them), and the details folded
+    below. Pick any saved version. When you add evidence after a draft, it says "Profile updated since this draft".
+    Screening answers, the manual checklist and the Greenhouse assisted plan are under **Application tools**.
+  - **Job & skill match:** each requirement with direct evidence, related experience or a gap; open one to see the
+    employer and experience record behind it, or add what you have with "I have …".
+  - **Activity & notes:** notes with a visible saved state, and status changes and document versions in date order.
+  Opening the page, switching tabs or previewing a saved document never calls the model.
+- **Profile:** search the experience bank by keyword or record ID, filter by employer and verification status.
+  Reading a resume opens a **review screen**: correct the name, contact, titles, employers, locations, dates,
+  bullets and skills; fields the reader wasn't sure about are marked "Check this", and you can add or remove roles.
+  Replacing your base resume keeps your experience bank, preferences, resume settings and documents.
+
+### Only what your profile backs
+
+Skills on a resume come from your own profile. An either-or requirement ("Playwright or Selenium") is met by
+the option you have, and only that option is listed; the phrase itself never is. A named tool needs the tool
+itself in your profile: related work doesn't count (Kubernetes does not show AWS). A final check removes any listed
+skill your profile doesn't back before the resume is printed or exported. Reworded bullets and summary sentences
+may not gain a tool, and letters and screening answers are flagged or trimmed when they name a tool your facts
+don't show. Summary sentences may paraphrase and combine what your records show, but each claim is checked
+against its evidence: tools, numbers, employers, leadership, ownership and outcomes, and wording taken from the
+posting that your profile never uses. Every flagged claim is recorded with its kind (`review.summary_checks`), apart
+from style problems such as a sentence that only repeats a bullet.
+
+Cover letters and screening answers go through the same claim checks (`app/claims.py`), sentence by sentence,
+against the records closest to each sentence: tools, employers (work is credited to the employer it was done at),
+numbers, leadership, ownership, and results or benefits ("which made it easier to catch issues") the records
+don't report. A sentence that fails is rewritten from its records: the AI's repair if it passes, otherwise the
+activity is kept without the part your records don't state, or the record is retold with its own employer, or
+the sentence is left out. Each case is listed under "Checked against your records" (`review.claim_checks`) with
+what the AI wrote, why it failed and what replaced it. These checks never add a model call.
 
 Optional local AI: install [Ollama](https://ollama.com), then `ollama pull qwen3:8b`. Without it the app still
 works (rules instead of AI for reading postings; your own wording for resumes and letters).
@@ -153,14 +233,14 @@ When Playwright's Chromium is installed (it is, for the browser tests), the resu
 count is checked for real; otherwise a cautious estimate is used.
 The resume card shows the result ("Fits on 2 pages") and how much was left out.
 
-## Settings and password (optional)
+## Settings (optional)
 
 ```bash
 cp .env.example .env      # then edit .env; it is git-ignored
 ```
 
-Set `APP_PASSWORD=...` in `.env` and restart the server: every page then asks you to sign in (Sign out is in
-the top bar). Leave it empty to keep the app open; it only listens on your own Mac either way.
+Accounts are on by default. With `JOB_AGENT_ACCOUNTS=off` the app has one shared workspace; `APP_PASSWORD=...`
+then protects it with a single password. It only listens on your own computer either way.
 
 ## Run with Docker (optional)
 
@@ -259,16 +339,26 @@ File > Print > Save as PDF. How it stays honest (`app/tailoring.py`):
   skills and description); skills the job asks for are listed first.
 - The AI lightly rewords the selected bullets; each rewording is compared with its original and rejected if
   it adds a number, a job skill, more than 3 words from the posting, AI-sounding phrasing, or 10+ words.
-- The summary is 5-6 sentences (about 6-7 printed lines): your own opening sentence (framed for the job only if
-  it stays true), one sentence for each of the job's top requirements built from 1-2 of your records, a line on
-  working with clients for client-facing roles, and one measured result when you have one. Each sentence goes
-  through the cover-letter checks, and a sentence that only repeats a bullet printed below it is left out. If too
-  little passes, your own summary is used.
+- The summary is 2-3 concise sentences, and its length follows your evidence (there is no word target): your own
+  opening sentence (framed for the job only if it stays true), one sentence combining the job's top two
+  requirements from your strongest records for them, then a line on working with clients for client-facing roles
+  or one measured result. A large profile gives the strongest role-relevant evidence; a small one gives a shorter,
+  accurate summary. A sentence that fails its claim checks is written without AI from your records, or left out
+  and replaced by the next requirement.
 - **Requirements → your experience → where it is on the resume** (Materials): every requirement of the posting,
   whether your records meet it fully, partly or not at all (what is shown and what is missing), and for each
   record the employer and bullet number it printed at, or that it was cut to fit two pages. People-skill lines
   ("curiosity", "seller-doer mindset") are shown separately and are never counted as gaps; lines about where and
-  how you work (hybrid days, in-person, the application process) are not requirements at all.
+  how you work (hybrid days, in-person, the application process) and the company describing itself are not
+  requirements at all.
+  Only the **named technical skills** of a line are scored: tools, languages, platforms and practices. Verbs and
+  abilities ("architect", "independently design", "estimate") and people skills ("analytical",
+  "problem-solving") are not. Each skill is looked for in the bullets on this resume, then in your whole verified
+  bank, then in your skill lists ("✓ MCP (your skills list)"), and understood the way a reviewer would:
+  "RestAssured" is REST Assured, GitHub/Bitbucket work is Git, Playwright/Selenium suites are end-to-end testing,
+  Java and Page Object frameworks show OOP, prompt-regression tests show prompt engineering (`RELATED` and
+  `ALIASES` in `app/evidence.py`, each entry defensible). "X, Y, or similar" lines need only one of them.
+- Skills the posting names (in any spelling) are kept when the page is trimmed to two pages.
 - The screen shows every reworded bullet next to its original, and every rejected rewording with the reason.
 
 Quick try against your real Ollama: `python scripts/try_ai.py`.
@@ -276,8 +366,16 @@ Tests never call Ollama: they use a fake model (`FakeLLM` in `tests/conftest.py`
 
 ## Importing jobs
 
-- `POST /jobs/quick` with a link and/or a description: adds the job, reading title, company, location and skills
-  from the posting (`app/job_intake.py`: board APIs, rules, and the local AI checked against the text).
+- `POST /jobs/quick` with a link and/or a description (and, optionally, the company): saves the job at once.
+  Title, company and location come from what you typed, the job board's API (Greenhouse, Lever, Ashby), the
+  page's structured data (schema.org JobPosting, else its title / site name, and LinkedIn links' company), then
+  rules (`app/job_intake.py`). Fields that are missing or were found an uncertain way are listed in
+  `intake.review` and highlighted on the Add job screen; the posting text and link stay with the job.
+- Only when something is missing (no title, no reliable company, fewer than three skills) is the local AI asked,
+  in the background after the job is saved (`app/intake_runs.py`, `GET /jobs/{id}/intake`). Each attempt has a
+  timeout (`JOB_INTAKE_AI_TIMEOUT`, default 45 s) and a capped answer, with at most `JOB_INTAKE_AI_RETRIES`
+  (default 1) more attempts. Its answer fills only the missing fields, only where the posting backs it, and never
+  a field you have changed, even if it answers later. If it fails, the fields read from the posting stay.
 - `POST /import/job` with a Greenhouse, Lever or Ashby job link: reads the posting from the board's public
   API and checks it against your target roles and locations. Nothing is saved until you `POST /jobs`.
 - `POST /import/board` with a company board link: lists open postings that fit your preferences, with the
@@ -338,7 +436,8 @@ app/
   main.py          entry point for uvicorn (reads .env, opens the real database)
   api.py           create_app(...): wires routers, error handlers, health, middleware
   config.py        settings from the environment / .env
-  auth.py          optional password protection (sign-in page, sessions, lockout)
+  accounts.py      accounts: sign in / create account, one private workspace per account, taking over local data
+  auth.py          single-workspace mode: optional password protection (sign-in page, sessions, lockout)
   observability.py request logging with redaction, security headers
   database.py      SQLite connection + schema
   schemas.py       Pydantic models: validation, response shapes, /docs
@@ -393,6 +492,13 @@ Requests flow **router → repository → SQLite**, and the match endpoint addit
 
 | Method | Path | Purpose |
 |---|---|---|
+| POST | `/auth/register`, `/auth/login`, `/auth/logout` | Create an account, sign in, sign out (accounts on) |
+| GET | `/auth/me` | The signed-in account, and whether local data can be taken over |
+| POST | `/auth/claim-local-data` | Copy the pre-accounts data into this (first) account's empty workspace |
+| GET | `/jobs/{id}/requirements` | Each requirement with its evidence and the records behind it (no AI) |
+| GET | `/applications/{id}/activity` | Notes, status changes and document versions in date order (no AI) |
+| POST | `/applications/{id}/prepare` | Generate both documents, or `{"steps": ["cover_letter"]}` for one (never twice at once) |
+| GET | `/documents/{id}/download` | A document as a .txt file |
 | GET / PUT | `/profile` | Read / create-or-replace the profile |
 | POST | `/profile/resume` | Read a resume file into a profile preview (not saved) |
 | POST | `/profile/bank` | Import an experience bank |

@@ -54,7 +54,7 @@ def letters_of_any_length(monkeypatch):
 
 def test_small_style_nits_do_not_cost_another_ai_call(client, fake_llm, app_id):
     """Speed: an honest draft with only a small nit (an em dash) is kept; the score says so."""
-    fake_llm.queue = [{"text": "I build pytest suites for a payments API — and I run them in CI.",
+    fake_llm.queue = [{"text": "I build pytest suites for a payments API — used by three internal teams.",
                        "fact_ids_used": ["F5"]}]
     doc = client.post(f"/applications/{app_id}/drafts", json={"kind": "cover_letter"}).json()
     h = doc["review"]["humanizer"]

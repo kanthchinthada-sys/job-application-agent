@@ -102,11 +102,16 @@ def test_printable_page(client, fake_llm, app_id, profile_data):
     assert "Mar 2021 - Present" in page.text
 
 
-def test_print_rejects_non_resume_and_missing(client, fake_llm, app_id):
+def test_a_letter_prints_as_a_letter_downloads_as_text_and_missing_is_404(client, fake_llm, app_id):
     fake_llm.answer = {"text": "Body.", "fact_ids_used": ["F1"]}
     letter = client.post(f"/applications/{app_id}/drafts", json={"kind": "cover_letter"}).json()
-    assert client.get(f"/documents/{letter['id']}/print").status_code == 409
+    page = client.get(f"/documents/{letter['id']}/print")
+    assert page.status_code == 200 and "<p>" in page.text
+    file = client.get(f"/documents/{letter['id']}/download")
+    assert file.status_code == 200 and "attachment" in file.headers["content-disposition"]
+    assert file.text == letter["content"]
     assert client.get("/documents/999/print").status_code == 404
+    assert client.get("/documents/999/download").status_code == 404
 
 
 def test_resume_versions_and_validated_edits(client, fake_llm, app_id):

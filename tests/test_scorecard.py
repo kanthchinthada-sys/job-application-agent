@@ -114,18 +114,20 @@ def test_without_ai_the_summary_never_repeats_a_bullet(client, fake_llm):
 
 
 def test_the_summary_is_framed_for_the_job_and_drops_a_sentence_that_copies_a_bullet(client, fake_llm):
-    answer = {"bullets": [], "sentences": [
-        {"id": "T1", "text": "Quality engineer with 9+ years of experience across banking and healthcare (fictional), "
-                             "focused on test strategy and defect triage."},
-        {"id": "T2", "text": "Led defect triage and shared release risks with business stakeholders and clients "
-                             "through regular updates (fictional)."},
-        {"id": "T3", "text": "Defined test strategies, closure criteria and testing priorities (fictional)."},
-    ]}
-    summary, bullets, review = _lead_resume(client, fake_llm, answer)
+    opening = ("Quality engineer with 9+ years of experience across banking and healthcare (fictional), "
+               "focused on test strategy and defect triage.")
+    good = ("Led defect triage and shared release risks with business stakeholders and clients through regular "
+            "updates (fictional).")
+    summary, bullets, review = _lead_resume(client, fake_llm, {"bullets": [], "sentences": [
+        {"id": "T1", "text": opening}, {"id": "T2", "text": good}]})
     assert summary.startswith("Quality engineer with 9+ years") and "focused on test strategy" in summary
-    assert "shared release risks with business stakeholders and clients" in summary
-    assert "closure criteria and testing priorities" not in summary          # it only repeated a bullet
-    assert any("repeated a bullet" in n for n in review["notes"])
+    assert good in summary                                                  # a valid rewording is kept
+    copy = "Defined test strategies, closure criteria and testing priorities (fictional)."
+    summary, bullets, review = _lead_resume(client, fake_llm, {"bullets": [], "sentences": [
+        {"id": "T1", "text": opening}, {"id": "T2", "text": copy}]})
+    assert copy not in summary                                              # it only repeated a bullet
+    entry = next(c for c in review["summary_checks"] if c["ai_sentence"] == copy)
+    assert entry["style"] == ["repeats a bullet"] and entry["unsupported"] == []   # style, not an invented claim
 
 
 def test_different_postings_change_the_evidence_not_just_the_keywords():

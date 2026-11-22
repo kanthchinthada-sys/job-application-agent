@@ -35,6 +35,29 @@ ALIASES: dict[str, str] = {
     "rest": "rest apis",
     "rest api": "rest apis",
     "restful apis": "rest apis",
+    # the same skill written without a space or as an abbreviation ("RestAssured", "E2E", "OOP")
+    "restassured": "rest assured",
+    "rest-assured": "rest assured",
+    "e2e": "end-to-end testing",
+    "e2e testing": "end-to-end testing",
+    "end to end testing": "end-to-end testing",
+    "end-to-end tests": "end-to-end testing",
+    "oop": "oop principles",
+    "object-oriented programming": "oop principles",
+    "object oriented programming": "oop principles",
+    "object-oriented design": "oop principles",
+    "model context protocol": "mcp",
+    "sdet roles": "sdet",
+    "senior sdet": "sdet",
+    "cd pipeline": "ci/cd pipelines",
+    "cd pipelines": "ci/cd pipelines",
+    "net": ".net",
+    "net ecosystem": ".net",
+    "elt processes": "elt",
+    "elt pipelines": "elt",
+    "software quality engineering": "quality engineering",
+    "devops ci": "ci/cd",
+    "ai-assisted workflows": "ai-assisted development",
 }
 
 
@@ -129,6 +152,7 @@ RELATED: dict[str, list[str]] = {
     "uat": ["user acceptance testing", "business acceptance testing", "uat"],
     "generative ai": ["github copilot", "claude code", "ai-generated"],
     "ai-assisted testing": ["github copilot", "claude code", "ai-generated"],
+    "ai-assisted development": ["github copilot", "claude code", "ai-assisted", "ai-generated"],
     # platforms and data
     "cloud": ["aws", "azure", "gcp", "kubernetes", "cloud"],
     "cloud technologies": ["aws", "azure", "gcp", "kubernetes", "cloud"],
@@ -149,6 +173,23 @@ RELATED: dict[str, list[str]] = {
     "monitoring and observability tools": ["prometheus", "grafana", "opensearch", "datadog"],
     "service health": ["readiness", "service health", "availability"],
     "agile": ["agile", "scrum", "sprint", "kanban"],
+    # skills a posting names that your work shows without the same words: OOP is how Java and Page Object
+    # frameworks are written; Playwright/Selenium suites are end-to-end tests; GitHub/Bitbucket are Git
+    "oop principles": ["object-oriented", "oop", "page object", "java", "c#", "kotlin", "typescript"],
+    "end-to-end testing": ["end-to-end", "e2e", "playwright", "selenium", "cypress", "webdriverio"],
+    "prompt engineering": ["prompt engineering", "prompt", "prompts", "prompt-regression"],
+    "mcp": ["mcp", "model context protocol"],
+    "git": ["git", "github", "gitlab", "bitbucket"],
+    "code reviews": ["code review", "code reviews", "pull request", "pull requests"],
+    "rest assured": ["rest assured"],
+    # your role itself: an SDET / QA career is shown by test automation and QA work
+    "sdet": ["test automation", "automated test", "automation framework", "test developer"],
+    "software qa": ["qa", "quality assurance", "quality engineering", "test automation", "test lead"],
+    "quality engineering": ["quality engineering", "qa", "test automation"],
+    "qa strategy": ["test strategy", "testing priorities", "automation strategy", "test plans"],
+    "elt": ["etl", "elt"],
+    "ai-enabled": ["claude code", "github copilot", "ai-assisted", "llm", "language model"],
+    "software development": ["java", "python", "typescript", "fastapi", "spring boot", "developed"],
     "agile methodologies": ["agile", "scrum", "sprint", "kanban"],
 }
 
@@ -348,6 +389,29 @@ def _requirement_parts(requirement: str, vocab) -> list[str]:
     return parts
 
 
+def _find_part(part: str, lowered: list[tuple[str, str, str]]) -> Evidence | None:
+    """The first text that shows one part: the same words (or an alias), then a RELATED term, then the same
+    content words in another form ("FHIR payload validation" ~ "Validated FHIR payloads")."""
+    for src, txt, low in lowered:
+        form = next((f for f in _forms(part) if _has(low, f)), None)
+        if form:
+            return Evidence(part=part, via=form, source=src, text=txt, related=False)
+    for src, txt, low in lowered:
+        via = next((r for r in RELATED.get(part, []) if _has(low, r)), None)
+        if via:
+            return Evidence(part=part, via=via.strip(), source=src, text=txt, related=True)
+    if len(_content_words(part)) >= 2:
+        for src, txt, low in lowered:
+            if _all_words_present(part, low):
+                return Evidence(part=part, via=part, source=src, text=txt, related=False)
+    return None
+
+
+def find_part(part: str, texts: list[tuple[str, str]]) -> Evidence | None:
+    """Evidence for one named skill in (source, text) pairs, or None."""
+    return _find_part(normalize(part), [(src, txt, " ".join(txt.lower().split())) for src, txt in texts])
+
+
 def match_requirement(profile: Profile, requirement: str, texts: list[tuple[str, str]] | None = None,
                       vocab: set[str] | None = None) -> RequirementMatch:
     texts = texts if texts is not None else profile_texts(profile)
@@ -368,23 +432,7 @@ def match_requirement(profile: Profile, requirement: str, texts: list[tuple[str,
             if hit is None:
                 continue
         if hit is None:
-            for src, txt, low in lowered:
-                form = next((f for f in _forms(part) if _has(low, f)), None)
-                if form:
-                    hit = Evidence(part=part, via=form, source=src, text=txt, related=False)
-                    break
-        if hit is None:
-            for src, txt, low in lowered:
-                via = next((r for r in RELATED.get(part, []) if _has(low, r)), None)
-                if via:
-                    hit = Evidence(part=part, via=via.strip(), source=src, text=txt, related=True)
-                    break
-        if hit is None and len(_content_words(part)) >= 2:
-            # Same words, different form: "FHIR payload validation" ~ "Validated FHIR payloads".
-            for src, txt, low in lowered:
-                if _all_words_present(part, low):
-                    hit = Evidence(part=part, via=part, source=src, text=txt, related=False)
-                    break
+            hit = _find_part(part, lowered)
         if hit:
             found.append(part)
             evidence.append(hit)

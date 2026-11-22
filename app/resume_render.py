@@ -90,7 +90,13 @@ def render(resume: TailoredResume, job_title: str, company: str) -> str:
   .toolbar {{ font: 13px -apple-system, sans-serif; background:#eef2ff; color:#2f5bea; padding: 8px 12px;
               border-radius: 8px; margin-bottom: 16px; }}
   @media print {{ .toolbar {{ display:none; }} body {{ margin: 0; }} }}
-</style></head>
+  .embedded .toolbar {{ display: none; }}
+</style>
+<script>if (window.self !== window.top) {{   // shown inside the app as a preview: read-only, no toolbar
+  document.documentElement.classList.add('embedded');
+  addEventListener('DOMContentLoaded', () =>
+    document.querySelectorAll('[contenteditable]').forEach(e => e.setAttribute('contenteditable', 'false')));
+}}</script></head>
 <body>
 <div class="toolbar"><a href="/ui/" onclick="if (history.length > 1) {{ history.back(); return false; }}">← Back to the app</a>
   · Tailored for <b>{escape(job_title)}</b> at <b>{escape(company)}</b>.

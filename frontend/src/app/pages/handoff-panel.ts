@@ -41,10 +41,10 @@ import { Msg, MsgBox } from '../ui';
         @if (askProof()) {
           <label for="handoff-proof">Confirmation evidence (email subject, confirmation number, …)</label>
           <input id="handoff-proof" [(ngModel)]="proof">
-          <button class="primary" type="button" (click)="record('confirmed')">Save as confirmed</button>
+          <button class="secondary" type="button" (click)="record('confirmed')">Save as confirmed</button>
           <button class="secondary" type="button" (click)="askProof.set(false)">Cancel</button>
         } @else {
-          <button class="primary" type="button" (click)="askProof.set(true)">I submitted and got a confirmation</button>
+          <button class="secondary" type="button" (click)="askProof.set(true)">I submitted and got a confirmation</button>
           <button class="secondary" type="button" (click)="record('uncertain')">Not sure it went through</button>
         }
         <app-msg [msg]="recordMsg()" />

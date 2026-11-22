@@ -87,7 +87,12 @@ def test_no_ai_still_works():
             raise LLMUnavailableError("Ollama is not running")
     info = intake(POSTING, None, Down())
     assert info.title == "Senior Software Engineer in Test" and "Kubernetes" in info.required_skills
+    assert info.ai_state == "not_needed"                          # the rules found everything: no model call
+    no_company = POSTING.replace("Contoso Health (fictional) · ", "").replace("About Contoso Health", "About us")
+    info = intake(no_company, None, Down())
+    assert info.ai_state == "failed" and "company" in info.review and info.company == "Unknown company"
     assert any("AI not used" in n for n in info.notes)
+    assert len(info.ai_attempts) == 1                             # not running: no point retrying
 
 
 @pytest.fixture

@@ -38,7 +38,7 @@ UI_DIR = PROJECT_ROOT / "frontend" / "dist" / "frontend" / "browser"   # output 
 
 def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=None,
                password: str | None = None, log_dir: Path | None = None, log_level: str = "INFO",
-               ui_dir: Path | None = None, fetch_page=None, request_api=None) -> FastAPI:
+               ui_dir: Path | None = None, fetch_page=None, request_api=None, accounts: bool = False) -> FastAPI:
     """``password``: turn on sign-in (main.py passes APP_PASSWORD). ``log_dir``: also log to a file.
     ``ui_dir``: the built Angular screen (default frontend/dist/frontend/browser), served at /ui/ if it exists."""
     db_path = Path(db_path) if db_path else get_db_path()
@@ -54,6 +54,11 @@ def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=
     app.state.request_api = request_api                # keyed job-search APIs (JSearch, Jooble); faked in tests
     from app.preparation import Preparer
     app.state.preparer = Preparer(db_path, app.state.llm)   # resume + cover letter in the background
+    app.state.preparers = {}                                # accounts on: one per workspace (dependencies.preparer)
+    from app.intake_runs import IntakeWorker
+    app.state.intake = IntakeWorker(db_path, app.state.llm)  # the model's step after adding a job, in the background
+    app.state.intake_workers = {}
+    app.state.accounts = None
 
     @app.exception_handler(NotFoundError)
     async def not_found_handler(request: Request, exc: NotFoundError):
@@ -76,8 +81,16 @@ def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=
 
     @app.get("/", include_in_schema=False)
     def home():
-        """The browser screen: http://127.0.0.1:8000"""
+        """The browser screen: http://127.0.0.1:8000 (with accounts: the full app at /ui/)"""
+        if accounts:
+            return RedirectResponse("/ui/", status_code=303)
         return FileResponse(PROJECT_ROOT / "app" / "static" / "index.html")
+
+    if not accounts:
+        @app.get("/auth/me", tags=["accounts"])
+        def me():
+            """Single-user mode: no accounts."""
+            return {"username": None, "accounts": False, "local_data_available": False}
 
     @app.get("/static/fictional_profile.json", include_in_schema=False)
     def example_profile():
@@ -98,7 +111,7 @@ def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=
                 jobs = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
             finally:
                 conn.close()
-            checks["database"] = {"ok": True, "jobs": jobs}
+            checks["database"] = {"ok": True} if accounts else {"ok": True, "jobs": jobs}
         except sqlite3.Error as exc:
             observability.logger.error("health: database check failed: %s", exc)
             checks["database"] = {"ok": False, "error": "database not readable"}
@@ -112,6 +125,7 @@ def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=
         else:
             status, code = "ok", 200
         body = {"status": status, "version": VERSION, "password_protection": app.state.auth is not None,
+                "accounts": accounts,
                 "angular_screen": app.state.ui_available,
                 "checks": checks}
         return JSONResponse(status_code=code, content=body)
@@ -135,7 +149,13 @@ def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=
     app.include_router(search.router)
 
     # Order matters: the middleware added LAST runs FIRST, so logging wraps sign-in and sees every 401.
-    auth.install_auth(app, password)
+    if accounts:
+        from app.accounts import AccountStore, install_accounts
+        install_accounts(app, AccountStore(db_path.parent, legacy_db=db_path))
+        app.state.auth = None
+    else:
+        auth.install_auth(app, password)
     observability.add_request_logging(app)
-    observability.logger.info("app started (db=%s, password protection %s)", db_path.name, "on" if password else "off")
+    observability.logger.info("app started (db=%s, %s)", db_path.name,
+                              "accounts on" if accounts else f"password protection {'on' if password else 'off'}")
     return app

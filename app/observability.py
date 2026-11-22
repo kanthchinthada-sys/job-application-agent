@@ -55,7 +55,7 @@ def setup_logging(log_dir: Path | None, level: str = "INFO") -> None:
 
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
+    "X-Frame-Options": "SAMEORIGIN",     # the app may show its own printable pages (resume preview); no other site may
     "Referrer-Policy": "no-referrer",
 }
 

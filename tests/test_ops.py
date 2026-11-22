@@ -62,7 +62,7 @@ def test_request_id_and_security_headers(client):
     r = client.get("/jobs", headers={"X-Request-ID": "abc123"})
     assert r.headers["X-Request-ID"] == "abc123"
     assert r.headers["X-Content-Type-Options"] == "nosniff"
-    assert r.headers["X-Frame-Options"] == "DENY"
+    assert r.headers["X-Frame-Options"] == "SAMEORIGIN"          # only the app itself frames its pages (preview)
     assert r.headers["Cache-Control"] == "no-store"                         # personal data is not cached
 
 

@@ -1,6 +1,6 @@
 import { Component, effect, inject, input, OnInit, signal, untracked } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
-import { Router } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 
 import { Api, ApiError } from '../api';
 import { AIMatchReport, Application, Job, MatchReport, pretty, SkillResult, SkillSection } from '../models';
@@ -11,34 +11,42 @@ import { Msg } from '../ui';
   selector: 'app-jobs-page',
   template: `
     <div class="card">
-      <h2>Jobs</h2>
+      <h2>Saved jobs</h2>
       @if (jobs() === null) {
-        <p class="muted">Loading…</p>
+        <p class="muted"><span class="spinner"></span> Loading…</p>
       } @else if (jobs()!.length === 0) {
-        <p class="muted">No jobs yet. New here? 1. Upload your resume on the <b>Profile</b> tab. 2. Use <b>Find jobs</b> to
-          search by title, country and date, or <b>Add job</b> to paste a posting you found.</p>
+        <div class="empty">No saved jobs yet. New here? 1. Set up your <a routerLink="/profile">profile</a>.
+          2. <a routerLink="/find">Find jobs</a> by title, country and date, or <a routerLink="/add">add a job</a> you found.</div>
       } @else {
-        <table>
-          <thead><tr><th>Job</th><th>Location</th><th>Application</th><th></th></tr></thead>
+        <div class="table-wrap">
+        <table data-testid="saved-jobs">
+          <thead><tr><th>Job</th><th class="hide-narrow">Location</th><th>Application</th><th></th></tr></thead>
           <tbody>
             @for (j of jobs(); track j.id) {
               <tr>
                 <td><b>{{ j.title }}</b><br><span class="muted">{{ j.company }}</span>
-                  @if (j.source_url) { <br><a [href]="j.source_url" target="_blank" rel="noopener" class="small">posting</a> }
+                  @if (j.source_url) { · <a [href]="j.source_url" target="_blank" rel="noopener" class="small">posting ↗</a> }
                 </td>
-                <td>{{ j.location || '—' }}</td>
+                <td class="hide-narrow">{{ j.location || '—' }}</td>
                 <td>
                   @if (appsByJob()[j.id]; as a) {
-                    <span class="label">{{ pretty(a.status) }}</span>
-                  } @else {
-                    <button class="secondary tight" type="button" (click)="track(j.id)">Track application</button>
-                  }
+                    <span class="badge">{{ pretty(a.status) }}</span>
+                    @for (d of a.documents_ready ?? []; track d) { <span class="badge ok">{{ d === 'resume' ? 'Resume' : 'Letter' }} ready</span> }
+                  } @else { <span class="muted small">Not started</span> }
                 </td>
-                <td><button class="secondary tight" type="button" (click)="openMatch(j.id)">Skill match</button></td>
+                <td style="white-space:nowrap">
+                  @if (appsByJob()[j.id]; as a) {
+                    <button class="secondary tight" type="button" (click)="openApp(a.id)">Open application</button>
+                  } @else {
+                    <button class="secondary tight" type="button" [disabled]="starting() === j.id" (click)="track(j.id)">Prepare application</button>
+                  }
+                  <button class="link-btn small" type="button" style="margin-left:8px" (click)="openMatch(j.id)">Skill match</button>
+                </td>
               </tr>
             }
           </tbody>
         </table>
+        </div>
       }
       @if (error(); as e) { <div class="msg bad">{{ e }}</div> }
     </div>
@@ -99,7 +107,7 @@ import { Msg } from '../ui';
       }
     </ng-template>
   `,
-  imports: [NgTemplateOutlet],
+  imports: [NgTemplateOutlet, RouterLink],
 })
 export class JobsPage implements OnInit {
   private api = inject(Api);
@@ -155,14 +163,25 @@ export class JobsPage implements OnInit {
     }
   }
 
+  protected readonly starting = signal<number | null>(null);
+
+  /** "Prepare application": start tracking it and open its workspace (generating is one click there). */
   async track(jobId: number) {
+    if (this.starting()) return;
+    this.starting.set(jobId);
     try {
       const app = await this.api.startApplication(jobId);
       this.router.navigate(['/applications', app.id]);
     } catch (e) {
-      this.error.set((e as ApiError).message);
+      const err = e as ApiError;
+      if (err.status === 409 && err.data?.existing_id) this.router.navigate(['/applications', err.data.existing_id]);
+      else this.error.set(err.message);
+    } finally {
+      this.starting.set(null);
     }
   }
+
+  openApp(id: number) { this.router.navigate(['/applications', id]); }
 
   protected asSection(s: unknown) { return s as SkillSection; }
 

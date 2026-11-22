@@ -19,6 +19,10 @@ class LLMUnavailableError(Exception):
     """Ollama is not running, or the model is not downloaded -> HTTP 503."""
 
 
+class LLMTimeoutError(LLMUnavailableError):
+    """The model didn't answer within the call's timeout (it may be busy or slow)."""
+
+
 class LLMOutputError(Exception):
     """The model answered, but not in the expected shape -> HTTP 502."""
 
@@ -26,16 +30,19 @@ class LLMOutputError(Exception):
 class LLMClient(Protocol):
     model: str
 
-    def generate_json(self, system: str, user: str, schema: dict) -> dict: ...
+    def generate_json(self, system: str, user: str, schema: dict) -> dict: ...   # may take timeout=, max_tokens=
 
     def status(self) -> dict: ...
 
 
 MAX_OUTPUT_TOKENS = 2400   # the longest real answer (a whole tailored resume) is about 1,300 tokens
+# Long enough for the longest answer on a slow laptop: 2,400 tokens at ~10 tokens/second, plus reading the prompt
+REQUEST_TIMEOUT = 330.0
 
 
 class OllamaClient:
-    def __init__(self, base_url: str = DEFAULT_OLLAMA_URL, model: str = DEFAULT_OLLAMA_MODEL, timeout: float = 180.0):
+    def __init__(self, base_url: str = DEFAULT_OLLAMA_URL, model: str = DEFAULT_OLLAMA_MODEL,
+                 timeout: float = REQUEST_TIMEOUT):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -47,7 +54,10 @@ class OllamaClient:
             model=os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
         )
 
-    def generate_json(self, system: str, user: str, schema: dict) -> dict:
+    def generate_json(self, system: str, user: str, schema: dict, timeout: float | None = None,
+                      max_tokens: int | None = None) -> dict:
+        """``timeout`` / ``max_tokens``: a shorter limit for one step (reading a job posting), else the defaults."""
+        timeout = timeout or self.timeout
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -56,11 +66,16 @@ class OllamaClient:
             "think": False,        # skip qwen3's long "Thinking..." text
             "options": {"temperature": 0,   # as repeatable as possible
                         "num_ctx": 8192,    # room for posting + profile; the default can silently cut prompts
-                        "num_predict": MAX_OUTPUT_TOKENS},   # a runaway answer ends as invalid, not a timeout
+                        "num_predict": max_tokens or MAX_OUTPUT_TOKENS},   # a runaway answer ends as invalid, not a timeout
             "keep_alive": "30m",            # keep the model loaded between calls: no reload wait
         }
         try:
-            response = httpx.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout)
+            response = httpx.post(f"{self.base_url}/api/chat", json=payload, timeout=timeout)
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(
+                f"The model took longer than {timeout:.0f} seconds to answer. It may be busy with another "
+                "request, or this computer may be slow for it: try again, or use a smaller model (OLLAMA_MODEL)."
+            ) from exc
         except httpx.HTTPError as exc:
             raise LLMUnavailableError(
                 f"Cannot reach Ollama at {self.base_url}. Is the Ollama app running?"

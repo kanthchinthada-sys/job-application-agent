@@ -302,6 +302,7 @@ def requirement_map(plan, resume, profile) -> list[dict]:
         shown = [r for r in records if r["printed"]]
         out.append({"requirement": row.requirement, "kind": row.kind, "category": row.category,
                     "strength": row.strength, "found": row.found_parts, "missing": row.not_found_parts,
+                    "found_elsewhere": row.found_elsewhere,
                     "on_resume": shown[:4], "more_on_resume": max(0, len(shown) - 4),   # the 4 most relevant
                     "not_printed": [r["id"] for r in records if not r["printed"]],
                     "where": "Education" if row.location == ["Education"] else None})

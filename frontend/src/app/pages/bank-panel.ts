@@ -24,7 +24,7 @@ const STATUS_LABEL: Record<RecordStatus, string> = {
       <textarea aria-label="Experience bank text" [(ngModel)]="text" placeholder="Northwind Bank | Toronto
 AB01: Built …
 AB02: Led …"></textarea>
-      <button class="primary" type="button" [disabled]="busy()" (click)="importText()">Import records</button>
+      <button class="secondary" type="button" [disabled]="busy()" (click)="importText()">Import records</button>
       <app-msg [msg]="msg()" />
 
       @if (report(); as r) {
@@ -39,32 +39,43 @@ AB02: Led …"></textarea>
       }
 
       @if (records().length) {
-        <div class="row" style="margin-top:12px">
-          <label class="inline">Show
-            <select aria-label="Filter records" [(ngModel)]="filter" style="width:auto">
-              <option value="all">all ({{ records().length }})</option>
-              @for (s of statuses; track s) { <option [value]="s">{{ s.replace('_', ' ') }} ({{ count(s) }})</option> }
-            </select>
-          </label>
+        <div class="toolbar" style="margin-top:14px" data-testid="bank-filters">
+          <div><label for="b-search">Search by keyword or record ID</label>
+            <input id="b-search" type="search" [(ngModel)]="search" placeholder="e.g. Kubernetes or AG12"></div>
+          <div style="flex:0 1 220px"><label for="b-owner">Employer or project</label>
+            <select id="b-owner" [(ngModel)]="owner">
+              <option value="">All ({{ records().length }})</option>
+              @for (o of ownerNames(); track o) { <option [value]="o">{{ o }}</option> }
+            </select></div>
+          <div style="flex:0 1 220px"><label for="b-status">Verification status</label>
+            <select id="b-status" aria-label="Filter records" [(ngModel)]="filter">
+              <option value="all">All statuses</option>
+              @for (s of statuses; track s) { <option [value]="s">{{ label(s) }} ({{ count(s) }})</option> }
+            </select></div>
         </div>
+        <p class="small muted" data-testid="bank-count">Showing {{ shown().length }} of {{ records().length }} records.</p>
+        <div class="table-wrap">
         <table class="small">
-          <thead><tr><th>ID</th><th>Record</th><th>Status</th></tr></thead>
+          <thead><tr><th>ID</th><th>Record</th><th style="min-width:250px">Status</th></tr></thead>
           <tbody>
             @for (r of shown(); track r.id) {
               <tr [class.needs-you]="r.status !== 'verified'">
                 <td><b>{{ r.id }}</b><div class="muted">{{ r.owner }}</div></td>
                 <td>{{ r.text }}
-                  @if (r.caveat) { <div class="muted">Context kept: {{ r.caveat }}</div> }
-                  @if (r.status_note) { <div class="muted">{{ r.status_note }}</div> }</td>
+                  @if (r.caveat) { <div class="muted">Context kept: {{ r.caveat }}</div> }</td>
                 <td>
-                  <select [attr.aria-label]="'Status of ' + r.id" [value]="r.status" (change)="setStatus(r, $any($event.target).value)">
+                  <select style="width:auto; max-width:100%" [attr.aria-label]="'Status of ' + r.id" [value]="r.status" (change)="setStatus(r, $any($event.target).value)">
                     @for (s of statuses; track s) { <option [value]="s" [selected]="s === r.status">{{ label(s) }}</option> }
                   </select>
+                  @if (r.status_note) { <div class="muted" style="margin-top:4px">{{ r.status_note }}</div> }
                 </td>
               </tr>
+            } @empty {
+              <tr><td colspan="3" class="empty">No record matches these filters.</td></tr>
             }
           </tbody>
         </table>
+        </div>
       }
     </div>
   `,
@@ -79,8 +90,17 @@ export class BankPanel implements OnInit {
   protected readonly report = signal<BankImportReport | null>(null);
   protected readonly records = signal<BankRecord[]>([]);
   protected readonly filter = signal<string>('all');
-  protected readonly shown = computed(() =>
-    this.filter() === 'all' ? this.records() : this.records().filter(r => r.status === this.filter()));
+  protected readonly search = signal('');
+  protected readonly owner = signal('');
+  protected readonly ownerNames = computed(() => [...new Set(this.records().map(r => r.owner))]);
+  protected readonly shown = computed(() => {
+    const q = this.search().trim().toLowerCase();
+    return this.records()
+      .filter(r => this.filter() === 'all' || r.status === this.filter())
+      .filter(r => !this.owner() || r.owner === this.owner())
+      .filter(r => !q || r.id.toLowerCase() === q || r.id.toLowerCase().startsWith(q) || r.text.toLowerCase().includes(q)
+                   || (r.group ?? '').toLowerCase().includes(q));
+  });
 
   async ngOnInit() {
     try {

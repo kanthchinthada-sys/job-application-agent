@@ -4,8 +4,8 @@ import { firstValueFrom, Observable } from 'rxjs';
 
 import {
   AIMatchReport, AiStatus, Application, BankImportReport, BankRecord, RecordStatus, BoardSearch, Doc, ExtractedSkills, Handoff, Health, ImportedJob, Job, MatchReport,
-  NewJob, QuickAdd, ResumeImport, CountryOption, SearchResult, FoundJob, ApplyResult, Preparation,
-} from './models';
+  NewJob, QuickAdd, ResumeImport, CountryOption, SearchResult, FoundJob, ApplyResult, Preparation, Me, Requirements,
+  Activity, IntakeStatus } from './models';
 
 /** An error from the backend, with its readable message (FastAPI's "detail"). */
 export class ApiError extends Error {
@@ -42,15 +42,22 @@ export class Api {
   health() { return this.call(this.http.get<Health>('/health')); }
   aiStatus() { return this.call(this.http.get<AiStatus>('/ai/status')); }
   logout() { return this.call(this.http.post('/logout', {})); }
+  me() { return this.call(this.http.get<Me>('/auth/me')); }
+  claimLocalData(setupCode: string) {
+    return this.call(this.http.post<Record<string, unknown>>('/auth/claim-local-data', { setup_code: setupCode }));
+  }
+  requirements(jobId: number) { return this.call(this.http.get<Requirements>(`/jobs/${jobId}/requirements`)); }
+  activity(appId: number) { return this.call(this.http.get<Activity>(`/applications/${appId}/activity`)); }
 
   jobs() { return this.call(this.http.get<Job[]>('/jobs')); }
   job(id: number) { return this.call(this.http.get<Job>(`/jobs/${id}`)); }
   match(id: number) { return this.call(this.http.get<MatchReport>(`/jobs/${id}/match`)); }
   aiMatch(id: number) { return this.call(this.http.post<AIMatchReport>(`/jobs/${id}/match/ai`, {})); }
   createJob(body: NewJob) { return this.call(this.http.post<Job>('/jobs', body)); }
-  quickAddJob(body: { url: string | null; description: string | null; allow_duplicate?: boolean }) {
+  quickAddJob(body: { url: string | null; description: string | null; allow_duplicate?: boolean; company?: string }) {
     return this.call(this.http.post<QuickAdd>('/jobs/quick', body));
   }
+  jobIntake(id: number) { return this.call(this.http.get<IntakeStatus>(`/jobs/${id}/intake`)); }
   refreshJob(id: number) { return this.call(this.http.post<Job>(`/jobs/${id}/refresh`, {})); }
   updateJob(id: number, body: Record<string, unknown>) { return this.call(this.http.patch<Job>(`/jobs/${id}`, body)); }
   extractSkills(description: string) {
@@ -86,7 +93,9 @@ export class Api {
     return this.call(this.http.post<Doc>(`/documents/${docId}/versions`, { content }));
   }
   preparation(appId: number) { return this.call(this.http.get<Preparation>(`/applications/${appId}/prepare`)); }
-  prepare(appId: number) { return this.call(this.http.post<Preparation>(`/applications/${appId}/prepare`, {})); }
+  prepare(appId: number, steps?: string[]) {
+    return this.call(this.http.post<Preparation>(`/applications/${appId}/prepare`, steps ? { steps } : {}));
+  }
   handoff(appId: number) { return this.call(this.http.get<Handoff>(`/applications/${appId}/handoff`)); }
 
   plan(appId: number) { return this.call(this.http.get<Doc>(`/applications/${appId}/submission/plan`)); }

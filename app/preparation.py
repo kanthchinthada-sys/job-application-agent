@@ -50,10 +50,12 @@ class _OneAtATime:
 
 class Preparation(BaseModel):
     application_id: int
-    state: str                       # idle | queued | running | done | failed
+    state: str                       # idle | queued | running | done | failed | interrupted (server restarted)
     step: str | None = None          # resume | cover_letter (while running)
     message: str = ""
     done_steps: list[str] = []
+    failed_steps: dict[str, str] = {}   # step -> why it failed (the other document may still be fine)
+    steps: list[str] = list(STEPS)      # what this run makes
     started_at: str | None = None
     finished_at: str | None = None
     timing: dict | None = None       # stages, model calls, tokens (app/metrics.py)
@@ -72,11 +74,59 @@ class Preparer:
         self._status: dict[int, Preparation] = {}
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prepare")   # one at a time: one local AI
+        self._mark_interrupted()
+
+    # --- saved progress (this workspace's database): a restart never loses track of a run -----------------
+    def _save(self, p: Preparation) -> None:
+        try:
+            conn = database.connect(self.db_path)
+            try:
+                conn.execute("INSERT OR REPLACE INTO generation_runs (application_id, data, updated_at) VALUES (?, ?, ?)",
+                             (p.application_id, p.model_dump_json(), _now()))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:                    # progress is a convenience: never fail a run because of it
+            pass
+
+    def _saved(self, application_id: int) -> Preparation | None:
+        try:
+            conn = database.connect(self.db_path)
+            try:
+                row = conn.execute("SELECT data FROM generation_runs WHERE application_id = ?", (application_id,)).fetchone()
+            finally:
+                conn.close()
+            return Preparation.model_validate_json(row["data"]) if row else None
+        except Exception:
+            return None
+
+    def _mark_interrupted(self) -> None:
+        """Runs left queued or running by a previous server process were interrupted: say so, per document."""
+        try:
+            conn = database.connect(self.db_path)
+            try:
+                rows = conn.execute("SELECT data FROM generation_runs").fetchall()
+            finally:
+                conn.close()
+        except Exception:
+            return
+        for row in rows:
+            p = Preparation.model_validate_json(row["data"])
+            if p.state in ("queued", "running"):
+                left = [s_ for s_ in p.steps if s_ not in p.done_steps and s_ not in p.failed_steps]
+                why = "Interrupted: the app stopped before this was finished. Your other documents are safe."
+                self._save(p.model_copy(update={
+                    "state": "interrupted", "step": None, "finished_at": _now(),
+                    "failed_steps": {**p.failed_steps, **{s_: why for s_ in left}},
+                    "message": "Generation was interrupted (the app was restarted). Retry the unfinished "
+                               + ("document." if len(left) == 1 else "documents.")}))
 
     def get(self, application_id: int) -> Preparation:
         with self._lock:
             p = self._status.get(application_id)
-            return p.model_copy() if p else Preparation(application_id=application_id, state="idle")
+            if p:
+                return p.model_copy()
+        return self._saved(application_id) or Preparation(application_id=application_id, state="idle")
 
     def start(self, application_id: int, steps: tuple[str, ...] = STEPS) -> Preparation:
         with self._lock:
@@ -85,16 +135,23 @@ class Preparer:
                 return current.model_copy()                      # already on its way: never twice
             # only say "waiting" when another application really is ahead of this one
             busy = any(p.state in ("queued", "running") for aid, p in self._status.items() if aid != application_id)
-            self._status[application_id] = Preparation(
-                application_id=application_id, state="queued", started_at=_now(),
+            # a document that failed or was interrupted before, and isn't part of this run, keeps its retry
+            before = current or self._saved(application_id)
+            carried = {k: v for k, v in (before.failed_steps if before else {}).items() if k not in steps}
+            self._status[application_id] = current = Preparation(
+                application_id=application_id, state="queued", started_at=_now(), steps=list(steps),
+                failed_steps=carried,
                 message="Waiting for the AI (another application is being prepared)…" if busy else "Starting…")
+        self._save(current)
         self._pool.submit(self._run, application_id, steps)
         return self.get(application_id)
 
     def _set(self, application_id: int, **changes) -> None:
         with self._lock:
-            p = self._status[application_id]
-            self._status[application_id] = p.model_copy(update=changes)
+            p = self._status[application_id].model_copy(update=changes)
+            self._status[application_id] = p
+        if set(changes) - {"timing"}:          # state changes are saved; timing is shown live only
+            self._save(p)
 
     def _run(self, application_id: int, steps: tuple[str, ...]) -> None:
         from app import metrics
@@ -113,13 +170,27 @@ class Preparer:
         from app.tailoring import _usable_skills
         conn = database.connect(self.db_path)
         done: list[str] = []
+        failed: dict[str, str] = dict(self.get(application_id).failed_steps)    # carried from earlier runs
+
+        def attempt(step: str, run) -> None:
+            """One document: its failure is recorded and never stops the other one."""
+            try:
+                run()
+                done.append(step)
+            except NotFoundError as exc:
+                failed[step] = ("Add your profile first (Profile: upload your resume), then generate again."
+                                if "profile" in str(exc).lower() else str(exc))
+            except LLMUnavailableError as exc:
+                failed[step] = f"The local AI isn't available: {exc}"
+            except Exception as exc:                       # LLMOutputError and anything else: never stuck
+                failed[step] = f"Could not finish ({exc.__class__.__name__}): {str(exc)[:200]}"
+            self._set(application_id, done_steps=list(done), failed_steps=dict(failed))
+
         try:
             if self.legacy or set(steps) != set(STEPS):
-                for step in steps:              # the old flow: one document after the other
+                for step in steps:              # one document, or the old flow: one after the other
                     self._set(application_id, state="running", step=step, message=f"{LABEL[step]}…")
-                    make_draft(conn, self.llm, application_id, step, legacy=self.legacy)
-                    done.append(step)
-                    self._set(application_id, done_steps=list(done))
+                    attempt(step, lambda step=step: make_draft(conn, self.llm, application_id, step, legacy=self.legacy))
             else:
                 # 1. analyse the job and match it to your experience ONCE, for both documents
                 self._set(application_id, state="running", step="resume", message=f"{LABEL['resume']}…")
@@ -137,34 +208,42 @@ class Preparer:
                     llm.started.wait(timeout=600)
                     c = database.connect(self.db_path)
                     try:
-                        return make_draft(c, llm, application_id, "cover_letter", plan=plan, job=job)
+                        attempt("cover_letter", lambda: make_draft(c, llm, application_id, "cover_letter",
+                                                                   plan=plan, job=job))
                     finally:
                         c.close()
 
                 with ThreadPoolExecutor(max_workers=1, thread_name_prefix="letter") as pool:
                     letter_done = pool.submit(ctx.run, letter)
                     try:
-                        make_draft(conn, llm, application_id, "resume", plan=plan, job=job)
+                        attempt("resume", lambda: make_draft(conn, llm, application_id, "resume", plan=plan, job=job))
                     finally:
                         llm.started.set()                  # never leave the letter waiting
-                    done.append("resume")
-                    self._set(application_id, step="cover_letter", done_steps=list(done),
-                              message=f"{LABEL['cover_letter']}…")
+                    self._set(application_id, step="cover_letter", message=f"{LABEL['cover_letter']}…")
                     letter_done.result()
-                    done.append("cover_letter")
-                    self._set(application_id, done_steps=list(done))
-            self._set(application_id, state="done", step=None, finished_at=_now(),
-                      message="Resume and cover letter are ready.")
+            if any(k in steps for k in failed):
+                names = {"resume": "resume", "cover_letter": "cover letter"}
+                ok = " and ".join(names[d] for d in done)
+                self._set(application_id, state="failed", step=None, finished_at=_now(),
+                          message=(f"The {ok} {'is' if len(done) == 1 else 'are'} ready; " if done else "")
+                          + "; ".join(f"the {names[k]} failed: {v}" for k, v in failed.items() if k in steps))
+            else:
+                ready = {("resume",): "The resume is ready.", ("cover_letter",): "The cover letter is ready."}
+                self._set(application_id, state="done", step=None, finished_at=_now(),
+                          message=ready.get(tuple(steps), "Resume and cover letter are ready."))
         except NotFoundError as exc:
-            msg = ("Add your profile first (Profile tab: upload your resume), then press Prepare again."
+            msg = ("Add your profile first (Profile: upload your resume), then generate again."
                    if "profile" in str(exc).lower() else str(exc))
-            self._set(application_id, state="failed", step=None, finished_at=_now(), message=msg)
+            self._set(application_id, state="failed", step=None, finished_at=_now(), message=msg,
+                      failed_steps={s_: msg for s_ in steps if s_ not in done})
         except LLMUnavailableError as exc:
-            self._set(application_id, state="failed", step=None, finished_at=_now(),
-                      message=f"The local AI isn't available: {exc}")
+            msg = f"The local AI isn't available: {exc}"
+            self._set(application_id, state="failed", step=None, finished_at=_now(), message=msg,
+                      failed_steps={s_: msg for s_ in steps if s_ not in done})
         except (LLMOutputError, Exception) as exc:                 # never leave it "running" forever
-            self._set(application_id, state="failed", step=None, finished_at=_now(),
-                      message=f"Could not finish ({exc.__class__.__name__}): {str(exc)[:200]}")
+            msg = f"Could not finish ({exc.__class__.__name__}): {str(exc)[:200]}"
+            self._set(application_id, state="failed", step=None, finished_at=_now(), message=msg,
+                      failed_steps={s_: msg for s_ in steps if s_ not in done})
         finally:
             conn.close()
 

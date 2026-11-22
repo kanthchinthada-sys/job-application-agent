@@ -106,6 +106,7 @@ class Row(BaseModel):
     not_found_parts: list[str] = []
     found_parts: list[str] = []   # what of the line your records show
     category: str = "technical"   # technical | soft skill | education
+    found_elsewhere: dict[str, str] = {}   # part -> "skills list" / "experience bank (ID, not on this resume)"
 
 
 class Plan(BaseModel):
@@ -170,7 +171,8 @@ def classify(job: JobOut) -> tuple[list[str], dict[str, int]]:
 
 _NOT_A_REQUIREMENT = re.compile(
     r"salary|compensation|pay range|base pay|\bbonus\b|equity|benefits|pto\b|vacation|401k|insurance|"
-    r"this posting|new vacancy|hiring process|^(begin|start)\s|^develop (a |an )?(strong |deep |good )?understanding|"
+    r"this posting|new vacancy|hiring process|^(begin|start)\s|^develop (a |an )?(strong |deep |good |in-depth )?understanding|"
+    r"#\w|^apply (today|now)\b|\$\s?\d|\b\d{2,3},\d{3}\b|"
     r"^get to know|^learn\s|^meet\s|onboard|^you('ll| will) (learn|work alongside|join)\b|^you won'?t\b|"
     r"application experience|accommodation|equal opportunity|\beeo\b|privacy|"
     r"^(first|within|by|after)\s+\d+\s+days|^\d+\s+days|success outcomes|^what success looks like", re.IGNORECASE)
@@ -187,6 +189,8 @@ def requirements(job: JobOut, profile: Profile) -> list[Requirement]:
         for line in lines:
             if _NOT_A_REQUIREMENT.search(line) or (len(line.split()) <= 3 and not ev.requirement_parts(line, vocab)):
                 continue                  # pay, benefits, "First 30 Days", stray headings: not something to prove
+            if kind == "responsibility" and _about_the_company(line, job.company):
+                continue                  # "Acme makes it easy to ...": the company describing itself, not a duty
             if kind != "responsibility" and re.search(r"authori[sz]ed to work|citizen|clearance|work permit|"
                                                       r"eligible to work|relocat|travel|english|french|bilingual|"
                                                       r"language proficiency", line, re.IGNORECASE):
@@ -194,6 +198,76 @@ def requirements(job: JobOut, profile: Profile) -> list[Requirement]:
                 continue
             out.append(Requirement(text=line, kind=kind, parts=ev.requirement_parts(line, vocab)))
     return out
+
+
+_EDUCATION = re.compile(r"\b(education|degree|diploma|bachelor'?s?|master'?s?|undergraduate|post-secondary|"
+                        r"graduate of|university)\b", re.IGNORECASE)
+_LEAD_VERB = re.compile(r"^(leverage|leveraging|use|using|build|building|design|designing|develop|developing|implement|"
+                        r"architect|maintain|drive|ensure|optimi[sz]e|enhance|integrate|identify|translate|estimate|"
+                        r"plan|execute|deliver|support|perform|conduct|create|write|apply|own|lead|work closely|work|contribute to|"
+                        r"contribute|assist with|assist|partner with|establish|define|languages?)\s+", re.IGNORECASE)
+_ANY_OF = re.compile(r"\bor\b|such as|e\.g\.|for example|similar|\bany\b", re.IGNORECASE)
+_ROLE_WORDS = re.compile(r"\b(you|your|this role|the role|will be|responsible|responsibilities|the (senior |junior |lead )?"
+                         r"[\w-]+ (engineer|tester|developer|analyst|lead|manager))\b", re.IGNORECASE)
+
+
+def _about_the_company(line: str, company: str) -> bool:
+    """A sentence where the company describes itself ("Acme makes it easy...", "Working for a company like Acme
+    means...", "At its heart, the Acme platform..."): it names the company and says nothing about the role."""
+    names = [company.strip()] + [w for w in company.split()[:1] if len(w) >= 4]
+    low = line.lower()
+    return any(n and re.search(rf"(?<!\w){re.escape(n.lower())}(?!\w)", low) for n in names) \
+        and not _ROLE_WORDS.search(line)
+
+
+# Parts that are a people skill or a way of working, never a technical one (on top of vocabulary.is_people_skill)
+_NOT_SKILL = re.compile(r"\b(customers?|clients?|business analysts?|developers|teams?|quality standards|culture|"
+                        r"timely|preferred|asset|plus|managers?|professionals|team members|engineers|partners?|"
+                        r"sales|customer success|marketing|finance|go-to-market)\b", re.IGNORECASE)
+# everyday words a posting capitalises in a list ("(Extract, Transform, Load)"); not product names
+_COMMON_WORDS = {"extract", "transform", "load", "support", "operations", "product", "engineering", "design",
+                 "quality", "success", "delivery", "security", "data", "development", "testing", "research"}
+
+
+def technical_parts(q: Requirement, vocab: set[str]) -> list[str]:
+    """The named technical skills a requirement line asks for: tools, languages, platforms and engineering
+    practices ("RestAssured", "OOP principles", "end-to-end testing"). Verbs and ways of working ("architect",
+    "independently design", "estimate"), people skills ("analytical", "problem-solving") and filler
+    ("preferred", "asset") are not scored: a resume shows them by example, and they are never a gap."""
+    from app.vocabulary import find_terms, is_people_skill
+    out: list[str] = []
+    for part in q.parts:
+        part = ev.normalize(_LEAD_VERB.sub("", part).strip())
+        if not part or part in out or ". " in part:
+            continue
+        if ev._degree_part(part) or is_people_skill(part) or _NOT_SKILL.search(part) or SOFT_PART.search(part):
+            continue
+        if part in vocab:
+            out.append(part)
+            continue
+        named = [ev.normalize(n.lower()) for _, _, n in find_terms(part)]
+        if named:
+            # a longer phrase around a named skill ("dashboards in Power BI", "environment setup using GitHub
+            # Actions"): the skill is what is scored
+            out.extend(n for n in named if n not in out and not _NOT_SKILL.search(n))
+            continue
+        if len(part.split()) > 3 or part in _COMMON_WORDS:
+            continue
+        # a product name as the posting writes it ("Kafka", "HL7 v2", "EHR systems"): capitals or digits that are
+        # not just the start of a sentence
+        m = re.search(rf"(?<![\w]){re.escape(part)}(?![\w])", q.text, re.IGNORECASE)
+        if m:
+            word = q.text[m.start():m.end()]
+            start = m.start() == 0 or q.text[:m.start()].rstrip().endswith((".", ":", ";"))
+            if re.search(r"[A-Z]{2}|\d|[a-z][A-Z]", word) or (word[:1].isupper() and not start):
+                out.append(part)
+    return out
+
+
+# people-skill words inside a part (SOFT minus words that also name technical things, like "async")
+SOFT_PART = re.compile(r"communicat|collaborat|stakeholder|ownership|ambigu|teamwork|team player|autonom|independ|"
+                       r"curios|mindset|proactive|interpersonal|relationship|empathy|fast-paced|self-starter|"
+                       r"problem[- ]solving|analytic|detail-oriented|culture|passion", re.IGNORECASE)
 
 
 def _is_soft(q: Requirement) -> bool:
@@ -448,7 +522,10 @@ def plan(profile: Profile, job: JobOut) -> Plan:
         selected.setdefault(by_id[rid].owner, []).append(rid)
 
     # --- report --------------------------------------------------------------------------------
-    skills_text = ", ".join(profile.skills + [s for g in profile.skill_groups for s in g.skills])
+    bank_texts = [(r.id, r.text) for r in records]
+    skill_texts = [("skills", ", ".join(profile.skills + [s for g in profile.skill_groups for s in g.skills]
+                                         + [s for e in profile.experience for s in e.skills]
+                                         + [s for pr in profile.projects for s in pr.skills]))]
     unverified = [r for r in profile.experience_bank if r.status != "verified"]
     rows: list[Row] = []
     gaps: list[str] = []
@@ -460,43 +537,65 @@ def plan(profile: Profile, job: JobOut) -> Plan:
                                f"; location {profile.contact.location or 'not stated'}. Check this yourself.")
             continue
         ids = [rid for rid in chosen if qi in hits.get(rid, {})]
-        if any(ev._degree_part(part) for part in q.parts):           # a degree is shown by Education only
+        if any(ev._degree_part(part) for part in q.parts) or _EDUCATION.search(q.text):
+            # a degree is shown by Education only. "Post-secondary / undergraduate education in X" is met by a
+            # bachelor's degree; "or equivalent working experience" is met by your experience.
             m = ev.match_requirement(profile, q.text, [("education", f"{e.degree}, {e.institution}")
                                                        for e in profile.education], vocab)
             degree_found = any(ev._degree_part(f) for f in m.found)
+            advanced = re.search(r"\b(master|ph\.?d|doctor)", q.text, re.IGNORECASE)
+            if not degree_found and not advanced and profile.education:
+                degree_found = True
+            if not degree_found and re.search(r"equivalent (work(ing)? )?experience", q.text, re.IGNORECASE) \
+                    and profile.experience:
+                degree_found = True
             rows.append(Row(requirement=q.text, kind=q.kind, selected_ids=[],
                             strength="direct" if degree_found else "gap", category="education",
                             location=["Education"] if degree_found else [], not_found_parts=[]))
             if not degree_found:
                 gaps.append(q.text)
             continue
-        found: set[str] = set()
-        if qi in soft:
-            # people skills: your records can show them by example, but they are never a gap to close
-            found = {p for rid in ids for p in hits[rid][qi]}
+        tech = technical_parts(q, vocab)
+        if qi in soft or not tech:
+            # people skills and ways of working: your records can show them by example, never a gap to close.
+            # A duty with no technical skill in it and nothing that shows it is not reported at all.
+            if q.kind == "responsibility" and not ids:
+                continue
+            from app.vocabulary import is_people_skill
+            found = {p for rid in ids for p in hits[rid][qi] if is_people_skill(p) or SOFT_PART.search(p)
+                     or p in ev.RELATED}
             rows.append(Row(requirement=q.text, kind=q.kind, selected_ids=ids, category="soft skill",
                             strength="shown by example" if ids else "not shown",
                             location=sorted({by_id[i].owner for i in ids}), found_parts=sorted(found),
-                            not_found_parts=[p for p in q.parts if p not in found][:6]))
+                            not_found_parts=[]))
             continue
+        # only the named technical skills of the line are scored; each is looked for in the bullets on this
+        # resume, then anywhere in your verified bank, then in your skill lists
+        found = {p for rid in ids for p in hits[rid][qi]}
+        shown_here = lambda part: part in found or any(part in f or f in part for f in found)
+        elsewhere: dict[str, str] = {}
+        for part in tech:
+            if shown_here(part):
+                continue
+            hit = ev.find_part(part, bank_texts)
+            if hit:
+                elsewhere[part] = f"experience bank: {hit.source} (not on this resume)"
+            elif ev.find_part(part, skill_texts):
+                elsewhere[part] = "your skills list"
+        missing = [p for p in tech if not shown_here(p) and p not in elsewhere]
+        # "Jenkins, Azure DevOps, or similar", "such as X, Y": one of them is enough
+        any_of = bool(_ANY_OF.search(q.text))
         if ids:
             direct = any(v == DIRECT for rid in ids for v in hits[rid][qi].values())
-            found = {p for rid in ids for p in hits[rid][qi]}
-            missing = [p for p in q.parts if p not in found and not any(p in f or f in p for f in found)]
-            # "direct" only when your records show most of what the line asks for, not one word of it
-            hard = [p for p in q.parts if not SOFT.search(p)]
-            hard_found = [p for p in hard if p not in missing]
-            strength = ("direct" if not hard or len(hard_found) * 2 >= len(hard) else "partial") if direct \
-                else "transferable"
+            strength = ("direct" if not missing or any_of else "partial") if direct else "transferable"
         else:
-            m = ev.match_requirement(profile, q.text, [("skills", skills_text)], vocab)
-            strength = "skills only" if m.found else "gap"
-            missing = m.not_found if m.found else q.parts
+            strength = "skills only" if len(missing) < len(tech) else "gap"
             if strength == "gap" and q.kind != "responsibility":
                 gaps.append(q.text)
         rows.append(Row(requirement=q.text, kind=q.kind, selected_ids=ids, strength=strength,
                         location=sorted({by_id[i].owner for i in ids}), not_found_parts=missing[:6],
-                        found_parts=sorted(found) if ids else [p for p in q.parts if p not in missing]))
+                        found_parts=sorted(f for f in found if f in tech or f in vocab and not SOFT_PART.search(f)
+                                           and not _NOT_SKILL.search(f)), found_elsewhere=elsewhere))
         for r in unverified:
             if ev.match_requirement(profile, q.text, [(r.id, r.text)], vocab).found and not ids:
                 excluded.append(f"{r.id} ({r.status.replace('_', ' ')}): could show '{q.text[:60]}'")
@@ -508,6 +607,22 @@ def plan(profile: Profile, job: JobOut) -> Plan:
         scores={rid: round(relevance(rid) + boost(rid) + (50 if rid in protected else 0), 2) for rid in chosen},
         family=fam.name, why={rid: role_pts[rid][1] for rid in chosen if role_pts.get(rid, (0, []))[1]},
     )
+
+
+def named_skills(profile: Profile, p: Plan) -> list[str]:
+    """The tools and skills this posting names that you have (e.g. "rest assured", "mcp"), however the posting
+    spelled them: kept when the resume is trimmed to fit, like the skills the posting lists."""
+    from app.vocabulary import TOOLS
+    yours = {ev.normalize(x) for x in profile.skills + [s for g in profile.skill_groups for s in g.skills]}
+    tools = {t.lower() for t in TOOLS} | {t.lower() for t in KNOWN_TECH}
+    out: list[str] = []
+    for r in p.rows:
+        if r.category != "technical":
+            continue
+        for part in r.found_parts + list(r.found_elsewhere):
+            if (part in tools or part in yours) and part not in out:
+                out.append(part)
+    return out
 
 
 def working_profile(profile: Profile, p: Plan) -> Profile:
@@ -560,7 +675,7 @@ TECH_CATEGORY: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
     (("data",), ("mysql", "oracle", "postgresql", "sqlite", "liquibase", "databricks", "azure data factory",
                  "great expectations", "hadoop", "power bi", "tableau", "fhir", "hl7")),
     (("ai applications", "ai"), ("ollama", "llm output validation")),
-    (("ai-assisted", "ai"), ("github copilot", "claude code")),
+    (("ai-assisted", "ai"), ("github copilot", "claude code", "mcp", "prompt engineering")),
     (("tools", "practices", "leadership"), ("hp alm", "jira", "postman")),
 ]
 
@@ -656,7 +771,7 @@ def select_skills(profile: Profile, job: JobOut, p: Plan, limit: int = 0,
             target = next(g for g in groups if g["name"] == home)
             target["skills"].append(s_)
             grouped.add(s_.lower())
-        elif s_.lower() in {t.lower() for t in KNOWN_TECH} or not groups:
+        elif s_.lower() in {t.lower() for t in KNOWN_TECH} or not groups or rank[s_][0] <= 2:
             rest.append(s_)              # a named tool with no fitting heading: listed under "Other tools"
     for g in groups:
         g["skills"].sort(key=lambda s_: rank.get(s_, (9, 999)))

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Path, Request
 from pydantic import BaseModel
 
 from app import ai_match, importers, job_intake, matching, page_reader, repository
-from app.dependencies import get_connection
+from app.dependencies import get_connection, intake_worker
 from app.errors import ConflictError
 from app.schemas import JobCreate, JobOut, JobQuickAdd, JobUpdate, MatchReport
 
@@ -37,11 +37,16 @@ def _normal_url(url: str | None) -> str | None:
              responses={409: {"description": "Already added, or the link can't be read"},
                         422: {"description": "Neither a readable link nor a description"}})
 def quick_add(body: JobQuickAdd, request: Request, conn: Conn):
-    """Add a job from its link and/or description. Title, company, location and skills are read from the posting
-    (job-board API for Greenhouse/Lever/Ashby links, otherwise rules plus the local AI, checked against the text)."""
+    """Add a job from its link and/or description, without waiting for the model.
+
+    Title, company and location come from (in order) what you typed, the job board's API (Greenhouse, Lever,
+    Ashby), the page's structured data (schema.org JobPosting, or its title/site name), then rules. The job is
+    saved at once; when something is still missing or uncertain the local AI is asked in the background
+    (GET /jobs/{id}/intake shows how it went) and fills only the fields you haven't changed."""
     from fastapi import HTTPException
     url = _normal_url(body.url)
     description = body.description or ""
+    known: dict[str, tuple[str, str]] = {}
     board = None
     if url:
         try:
@@ -50,12 +55,15 @@ def quick_add(body: JobQuickAdd, request: Request, conn: Conn):
                 board = importers.fetch_job(link, request.app.state.fetch)
         except ConflictError:
             board = None                     # not a supported board: the description is needed
-    page = None
-    if url and board is None and len(description.strip()) < 800:
-        # any other job page: read its schema.org JobPosting (most job sites publish one)
-        page = page_reader.fetch_posting(url, request.app.state.fetch_page)
-        if page is not None and len(page.description) > len(description):
-            description = page.description
+    page, meta = None, {}
+    if url and board is None:
+        rules_unsure = bool(description.strip()) and bool(
+            job_intake.read_with_rules(description, url).missing) and not (body.title and body.company)
+        if len(description.strip()) < 800 or rules_unsure:
+            # any other job page: its schema.org JobPosting (most job sites publish one), else its title/site name
+            page, meta = page_reader.fetch_page_info(url, request.app.state.fetch_page)
+            if page is not None and len(page.description) > len(description):
+                description = page.description
     if board is not None:
         url = board.source_url
         if len(board.description) >= len(description):
@@ -64,21 +72,30 @@ def quick_add(body: JobQuickAdd, request: Request, conn: Conn):
         row = conn.execute("SELECT id FROM jobs WHERE source_url = ?", (url,)).fetchone()
         if row:
             raise ConflictError(f"This posting is already in your jobs (job id {row['id']}).", existing_id=row["id"])
+    if not body.allow_duplicate and len(description.strip()) >= 50:
+        # the same posting pasted again: found before any AI runs
+        same = _same_description(conn, description)
+        if same is not None:
+            raise ConflictError(f"You already saved this posting: '{same['title']}' at {same['company']} "
+                                f"(job id {same['id']}).", existing_id=same["id"])
     if len(description.strip()) < 50:
         raise HTTPException(status_code=422, detail="Paste the job description too: this page doesn't publish "
                                                     "its posting in a form the app can read.")
-    info = job_intake.intake(description, url, request.app.state.llm, use_ai=body.use_ai)
-    if page is not None and description == page.description:
-        if page.title:
-            info.title, info.found_by["title"] = page.title, "job page"
-        if page.company:
-            info.company, info.found_by["company"] = page.company, "job page"
-        if page.location:
-            info.location, info.found_by["location"] = page.location, "job page"
-    if board is not None:
-        info.title, info.company = board.title, board.company
-        info.location = board.location or info.location
-        info.found_by.update({"title": "job board", "company": "job board", "location": "job board"})
+    # most reliable first: what you typed, the job board, the page's structured data, the page's title/site name
+    for key in ("title", "company", "location"):
+        if board is not None and getattr(board, key, None):
+            known.setdefault(key, (getattr(board, key), "job board"))
+        if page is not None and getattr(page, key, None):
+            known.setdefault(key, (getattr(page, key), "job page"))
+        if meta.get(key):
+            known.setdefault(key, meta[key])
+    for key in ("title", "company"):
+        if getattr(body, key):
+            known[key] = (getattr(body, key), "you")
+    info = job_intake.read_with_rules(description, url, known)
+    for key, (_, source) in known.items():
+        if source == "job page (site name)":
+            info.review.append(key)          # a careers site's name is usually, not always, the company
     from pydantic import ValidationError
     try:
         new = JobCreate(title=info.title, company=info.company, location=info.location, source_url=url,
@@ -88,15 +105,44 @@ def quick_add(body: JobQuickAdd, request: Request, conn: Conn):
         raise HTTPException(status_code=422, detail=f"Could not add this job: {exc.errors()[0]['msg']} "
                                                     f"({'.'.join(map(str, exc.errors()[0]['loc']))}).") from exc
     job = repository.create_job(conn, new)
+    if info.missing:
+        if body.use_ai and request.app.state.llm is not None:
+            info.ai_state = "pending"
+            intake_worker(request).start(conn, job.id, info, description, url)
+        else:
+            info.ai_state = "off"
     return QuickAddOut(job=job, intake=info)
+
+
+class IntakeStatus(BaseModel):
+    ai_state: str                 # not_needed | pending | done | failed | off
+    review: list[str] = []        # fields to check (missing, or found an uncertain way)
+    notes: list[str] = []
+    found_by: dict[str, str] = {}
+    applied: list[str] = []       # fields the AI filled
+    kept: list[str] = []          # fields the AI would have changed, kept as you corrected them
+    attempts: list[dict] = []
+    job: JobOut
+
+
+@router.get("/{job_id}/intake", response_model=IntakeStatus, responses={404: {"description": "Job not found"}})
+def intake_status(job_id: JobId, request: Request, conn: Conn):
+    """How the model's background step for a new job went. Reading it never calls the model."""
+    job = repository.get_job(conn, job_id)
+    data = intake_worker(request).get(conn, job_id) or {"ai_state": "not_needed"}
+    return IntakeStatus(job=job, **{k: v for k, v in data.items() if k in IntakeStatus.model_fields})
 
 
 @router.patch("/{job_id}", response_model=JobOut, responses={404: {"description": "Job not found"}})
 def update_job(job_id: JobId, body: JobUpdate, request: Request, conn: Conn):
     """Fix the title, company, location, description or skills that were read from the posting.
 
-    A new description without skills: the skills are read again from it (rules, plus the local AI if running)."""
+    A field you change here is never overwritten by the model's background step, even if it answers later.
+    A new description without skills: the skills are read again from it (rules, plus the local AI if needed)."""
     changes = body.model_dump(exclude_unset=True, exclude_none=True)
+    repository.get_job(conn, job_id)
+    fields = {"skills" if k.endswith("_skills") else k for k in changes}
+    intake_worker(request).lock(conn, job_id, fields)     # before saving: a late answer can't slip in between
     if "description" in changes and "required_skills" not in changes:
         job = repository.get_job(conn, job_id)
         info = job_intake.intake(changes["description"], job.source_url and str(job.source_url),
@@ -180,3 +226,42 @@ def ai_second_look(job_id: JobId, conn: Conn, request: Request):
     missing = (matching.compare_skills(profile, job.required_skills).missing
                + matching.compare_skills(profile, job.preferred_skills).missing)
     return ai_match.second_look(request.app.state.llm, profile, missing)
+
+
+def _same_description(conn, description: str):
+    import re
+    norm = lambda t: re.sub(r"\W+", " ", t).strip().lower()
+    target = norm(description)
+    for row in conn.execute("SELECT id, title, company, description FROM jobs"):
+        if norm(row["description"]) == target:
+            return row
+    return None
+
+
+@router.get("/{job_id}/requirements", responses={404: {"description": "Job or profile not found"}})
+def requirements(job_id: JobId, conn: Conn):
+    """The posting's requirements and, for each, your evidence: the exact employer/project and experience
+    records behind a direct match, related experience, or a gap. The same analysis the resume uses; no AI."""
+    from app import selection
+    from app.bank import verified
+    profile = repository.get_profile(conn)
+    job = repository.get_job(conn, job_id)
+    plan = selection.plan(profile, job)
+    records = {r.id: r for r in profile.experience_bank}
+    label = {"direct": "direct evidence", "partial": "direct evidence (part of it)", "transferable": "related experience",
+             "skills only": "related experience (skills list)", "gap": "gap", "shown by example": "shown by example",
+             "not shown": "not shown"}
+    rows = []
+    for r in plan.rows:
+        rows.append({
+            "requirement": r.requirement, "kind": r.kind, "category": r.category, "strength": r.strength,
+            "evidence": label.get(r.strength, r.strength), "found": r.found_parts, "missing": r.not_found_parts,
+            "found_elsewhere": r.found_elsewhere,
+            "records": [{"id": i, "owner": records[i].owner, "text": records[i].text} for i in r.selected_ids
+                        if i in records],
+        })
+    order = {"required": 0, "preferred": 1, "responsibility": 2}
+    cat = {"technical": 0, "education": 1, "soft skill": 2}
+    rows.sort(key=lambda x: (cat.get(x["category"], 3), order.get(x["kind"], 3)))
+    return {"job_id": job.id, "role_types": plan.role_types, "has_bank": bool(verified(profile)),
+            "eligibility": plan.eligibility, "rows": rows}

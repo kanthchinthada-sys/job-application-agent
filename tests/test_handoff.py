@@ -8,16 +8,16 @@ def test_handoff_collects_latest_materials(client, fake_llm, profile_data, make_
     job = make_job()
     app_id = client.post("/applications", json={"job_id": job["id"]}).json()["id"]
 
-    fake_llm.answer = {"text": "First body.", "fact_ids_used": ["F1"]}
+    fake_llm.answer = {"text": "I built a pytest suite.", "fact_ids_used": ["F1"]}
     client.post(f"/applications/{app_id}/drafts", json={"kind": "cover_letter"})
-    fake_llm.answer = {"text": "Second body.", "fact_ids_used": ["F1"]}
+    fake_llm.answer = {"text": "I reproduced production issues using Docker.", "fact_ids_used": ["F1"]}
     client.post(f"/applications/{app_id}/drafts", json={"kind": "cover_letter"})
     fake_llm.answer = {"text": "Yes.", "fact_ids_used": ["F2"]}
     client.post(f"/applications/{app_id}/drafts", json={"kind": "screening_answer", "question": "Can you work in Canada?"})
 
     h = client.get(f"/applications/{app_id}/handoff").json()
     assert h["apply_url"] == job["source_url"]
-    assert "Second body." in h["cover_letter"]["content"] and h["cover_letter"]["version"] == 2
+    assert "reproduced production issues" in h["cover_letter"]["content"] and h["cover_letter"]["version"] == 2
     assert [a["question"] for a in h["screening_answers"]] == ["Can you work in Canada?"]
     labels = {f["label"]: f["value"] for f in h["copy_fields"]}
     assert labels["Phone"] == "+1 555 0100" and labels["Work authorization"] == "FICTIONAL: authorized"

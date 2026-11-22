@@ -1,98 +1,51 @@
 import { TestBed } from '@angular/core/testing';
 
-import { APP, button, settle, setup, text } from '../testing/setup';
+import { APP, settle, setup, text } from '../testing/setup';
 import { ApplicationsPage } from './applications-page';
 
+const APPS = [
+  { ...APP, documents_ready: ['resume', 'cover_letter'], last_activity: '2026-11-20T10:00:00Z' },
+  { ...APP, id: 8, job_title: 'SDET', company: 'Northwind (fictional)', status: 'submitted_confirmed',
+    documents_ready: [], last_activity: '2026-11-21T10:00:00Z' },
+];
+
 async function render() {
+  sessionStorage.clear();
   const ctx = setup([ApplicationsPage]);
   const fixture = TestBed.createComponent(ApplicationsPage);
   fixture.detectChanges();
-  ctx.http.expectOne('/applications').flush([APP]);
+  ctx.http.expectOne('/applications').flush(APPS);
   await settle(fixture);
   return { ...ctx, fixture };
 }
 
-function choose(fixture: any, value: string) {
-  const select = fixture.nativeElement.querySelector('select') as HTMLSelectElement;
-  select.value = value;
-  select.dispatchEvent(new Event('change'));
-}
+const rows = (fixture: any) => fixture.nativeElement.querySelectorAll('tbody tr').length;
 
 describe('ApplicationsPage', () => {
-  it('offers only the statuses the backend allows next', async () => {
+  it('lists compact rows: status apart from document readiness, newest activity first', async () => {
     const { fixture } = await render();
-    const options = Array.from(fixture.nativeElement.querySelectorAll('option')).map((o: any) => o.value);
-    expect(options).toEqual(['preparing', 'ready_for_review', 'withdrawn', 'submitted_confirmed']);
+    expect(rows(fixture)).toBe(2);
+    const first = fixture.nativeElement.querySelector('tbody tr').textContent;
+    expect(first).toContain('Northwind (fictional)');
+    expect(text(fixture)).toContain('Resume ready');
+    expect(text(fixture)).toContain('submitted confirmed');
+    expect(fixture.nativeElement.querySelector('textarea')).toBeNull();          // no always-open notes boxes
   });
 
-  it('never lists a status twice', async () => {
+  it('searches by company and filters by status', async () => {
     const { fixture } = await render();
-    const page = fixture.componentInstance as any;
-    expect(page.statusChoices({ ...APP, status: 'ready_for_review', allowed_next: ['ready_for_review', 'withdrawn'] }))
-      .toEqual(['ready_for_review', 'withdrawn']);
-  });
-
-  it('changes a status', async () => {
-    const { fixture, http } = await render();
-    choose(fixture, 'ready_for_review');
-    const req = http.expectOne('/applications/7');
-    expect(req.request.method).toBe('PATCH');
-    expect(req.request.body).toEqual({ status: 'ready_for_review' });
-    req.flush({ ...APP, status: 'ready_for_review' });
+    const search = fixture.nativeElement.querySelector('#a-search') as HTMLInputElement;
+    search.value = 'example corp';
+    search.dispatchEvent(new Event('input'));
     await settle(fixture);
-    http.expectOne('/applications').flush([{ ...APP, status: 'ready_for_review' }]);
+    expect(rows(fixture)).toBe(1);
+    search.value = '';
+    search.dispatchEvent(new Event('input'));
+    const status = fixture.nativeElement.querySelector('#a-status') as HTMLSelectElement;
+    status.value = 'submitted_confirmed';
+    status.dispatchEvent(new Event('change'));
     await settle(fixture);
-  });
-
-  it('never marks an application confirmed without evidence', async () => {
-    const { fixture, http } = await render();
-    choose(fixture, 'submitted_confirmed');
-    await settle(fixture);
-    http.expectNone('/applications/7');                          // nothing sent yet
-    expect(text(fixture)).toContain('Confirmation evidence (required)');
-
-    button(fixture, 'Mark confirmed').click();                   // empty evidence
-    await settle(fixture);
-    http.expectNone('/applications/7');
-    expect(text(fixture)).toContain('Paste the confirmation evidence first');
-
-    const input = fixture.nativeElement.querySelector('#proof-7') as HTMLInputElement;
-    input.value = 'Confirmation email "Thanks for applying" (fictional)';
-    input.dispatchEvent(new Event('input'));
-    button(fixture, 'Mark confirmed').click();
-    const req = http.expectOne('/applications/7');
-    expect(req.request.body).toEqual({
-      status: 'submitted_confirmed', submission_confirmation: 'Confirmation email "Thanks for applying" (fictional)',
-    });
-    req.flush({});
-    await settle(fixture);
-    http.expectOne('/applications').flush([APP]);
-    await settle(fixture);
-  });
-});
-
-describe('ApplicationsPage cancel', () => {
-  it('puts the status back when you cancel confirming', async () => {
-    const { fixture, http } = await render();
-    choose(fixture, 'submitted_confirmed');
-    await settle(fixture);
-    button(fixture, 'Cancel').click();
-    await settle(fixture);
-    http.expectNone('/applications/7');                          // nothing saved
-    expect((fixture.nativeElement.querySelector('select') as HTMLSelectElement).value).toBe('preparing');
-    expect(text(fixture)).not.toContain('Confirmation evidence (required)');
-  });
-});
-
-describe('ApplicationsPage refused change', () => {
-  it('shows the saved status again when the backend refuses a change', async () => {
-    const { fixture, http } = await render();
-    choose(fixture, 'withdrawn');
-    http.expectOne('/applications/7').flush({ detail: 'Not allowed (fictional rule)' }, { status: 409, statusText: 'Conflict' });
-    await settle(fixture);
-    http.expectOne('/applications').flush([APP]);
-    await settle(fixture);
-    expect(text(fixture)).toContain('Not allowed (fictional rule)');
-    expect((fixture.nativeElement.querySelector('select') as HTMLSelectElement).value).toBe('preparing');
+    expect(rows(fixture)).toBe(1);
+    expect(text(fixture)).toContain('SDET');
   });
 });

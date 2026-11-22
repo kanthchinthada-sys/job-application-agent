@@ -91,10 +91,21 @@ def fit(resume, scores: dict[str, float] | None = None, ai_or_fde: bool = False,
         for g in resume.skill_groups:
             if len(g["skills"]) > cap:
                 g["skills"].sort(key=lambda s: not has_key(s))       # stable: job keywords first
+                # among those, a skill that adds a job keyword the resume doesn't show yet comes first;
+                # one that only repeats a keyword ("API testing" next to "API and integration testing") after
+                from app.ats import resume_has
+                shown = " ".join([getattr(resume, "summary", "") or ""] + [b.text for r in resume.experience for b in r.bullets])
+                covered = {k for k in keys if resume_has(shown, k)}
+                first, later = [], []
+                for s in g["skills"]:
+                    mine = {k for k in keys if resume_has(s, k)}
+                    (first if mine - covered else later).append(s)
+                    covered |= mine
+                g["skills"] = first + [s for s in later if has_key(s)] + [s for s in later if not has_key(s)]
                 keep = g["skills"][:cap]
                 # make room for named tools before generic phrases
                 extra_tools = [s for s in g["skills"][cap:] if _is_tool(s)]
-                generic = [s for s in keep if not _is_tool(s)]
+                generic = [s for s in keep if not _is_tool(s) and not has_key(s)]   # job keywords stay
                 while extra_tools and generic:
                     keep.remove(generic.pop())
                     keep.append(extra_tools.pop(0))

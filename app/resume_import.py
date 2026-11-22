@@ -61,6 +61,8 @@ class ResumeImport(BaseModel):
     profile: dict                 # ready for PUT /profile after your review
     warnings: list[str]
     sections_found: list[str]
+    # fields the reader is not sure about, for the review screen ("full_name", "experience.0.title", ...)
+    uncertain: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +212,9 @@ def parse_resume(text: str) -> ResumeImport:
     if not name:
         name = header[0] if header else lines[0]
         warnings.append("Could not find your name at the top; please check it.")
+        name_unsure = True
+    else:
+        name_unsure = False
     name = re.split(r"\s*[|,]\s*", name)[0]
     headline = next((x for x in header[1:] if x != name and not _EMAIL.search(x) and not _PHONE.search(x)
                      and not _LINK.search(x) and len(x.split()) <= 12), None)
@@ -258,7 +263,9 @@ def parse_resume(text: str) -> ResumeImport:
     if flat:
         profile["skills"] = list(dict.fromkeys(flat))[:200]
 
-    profile["experience"] = _experience(_join_wrapped(sections.get("experience", [])), warnings)
+    uncertain: list[str] = []
+    profile["experience"] = _experience(_join_wrapped(_company_then_dated_title(sections.get("experience", []))),
+                                        warnings, uncertain)
     profile["projects"] = _projects(_join_wrapped(sections.get("projects", [])))
     profile["education"] = _education(sections.get("education", []))
     certs = [_BULLET.sub("", x) for x in sections.get("certifications", [])]
@@ -273,7 +280,35 @@ def parse_resume(text: str) -> ResumeImport:
     for key in ("summary", "skills", "experience"):
         if key not in sections:
             warnings.append(f"No {key.upper()} heading found.")
-    return ResumeImport(profile=profile, warnings=warnings, sections_found=list(sections))
+    if name_unsure:
+        uncertain.insert(0, "full_name")
+    if "email" not in contact:
+        uncertain.append("contact.email")
+    if not flat:
+        uncertain.append("skills")
+    if not profile["experience"]:
+        uncertain.append("experience")
+    return ResumeImport(profile=profile, warnings=warnings, sections_found=list(sections), uncertain=uncertain)
+
+
+_TITLE_WORDS = re.compile(
+    r"\b(engineer|developer|analyst|manager|lead|tester|sdet|qa|designer|consultant|specialist|scientist|"
+    r"architect|director|intern|administrator|coordinator|officer|associate|head|programmer|technician|"
+    r"president|founder|owner|advisor|instructor|teacher|researcher|representative|support|operator|"
+    r"principal|staff engineer|vp)\b", re.IGNORECASE)
+
+
+def _looks_like_title(text: str) -> bool:
+    return bool(_TITLE_WORDS.search(text)) and len(text.split()) <= 8 and not re.search(r"\d", text)
+
+
+def _title_company_location(text: str) -> tuple[str, str, str | None] | None:
+    """ "Senior QA Engineer, Example Corp, Toronto, ON" -> (title, company, location), when it starts with a
+    title. Also with " | " or " - " between the parts."""
+    parts = [p.strip(" ,-–—") for p in re.split(r"\s*,\s*|\s+[|•·]\s+|\s+[–—-]\s+", text) if p.strip(" ,-–—")]
+    if len(parts) >= 2 and _looks_like_title(parts[0]) and not _looks_like_title(parts[1]):
+        return parts[0], parts[1], (", ".join(parts[2:]) or None)
+    return None
 
 
 def _split_company_line(text: str) -> tuple[str, str | None]:
@@ -284,7 +319,28 @@ def _split_company_line(text: str) -> tuple[str, str | None]:
     return parts[0], (", ".join(parts[1:]) or None)
 
 
-def _experience(lines: list[str], warnings: list[str]) -> list[dict]:
+def _company_then_dated_title(lines: list[str]) -> list[str]:
+    """ "Example Corp, Toronto, ON" then "Senior QA Engineer, Jan 2021 - Present" -> one dated line
+    "Senior QA Engineer, Example Corp, Toronto, ON | Jan 2021 - Present" (before wrapped lines are joined)."""
+    out: list[str] = []
+    skip = False
+    for j, x in enumerate(lines):
+        if skip:
+            skip = False
+            continue
+        nxt = lines[j + 1] if j + 1 < len(lines) else ""
+        m = _RANGE.search(nxt) if nxt and not _BULLET.match(nxt) else None
+        if m and not _BULLET.match(x) and not _RANGE.search(x) and not _looks_like_title(x) \
+                and _looks_like_title(nxt[:m.start()].strip(" |,–-")) and not nxt[m.end():].strip(" |,–-"):
+            out.append(f"{nxt[:m.start()].strip(' |,–-')}, {x} | {nxt[m.start():]}")
+            skip = True
+            continue
+        out.append(x)
+    return out
+
+
+def _experience(lines: list[str], warnings: list[str], uncertain: list[str] | None = None) -> list[dict]:
+    uncertain = uncertain if uncertain is not None else []
     roles: list[dict] = []
     i = 0
     while i < len(lines):
@@ -306,6 +362,8 @@ def _experience(lines: list[str], warnings: list[str]) -> list[dict]:
         after = x[m.end():].strip(" |,–-")
         title = ""
         company, location = _split_company_line(before or after)
+        if tcl := _title_company_location(before or after):     # "Title, Company, Location | Dates"
+            title, company, location = tcl
         # "Senior Engineer, Northwind Bank" or "Senior Engineer at Northwind Bank"
         at = re.match(r"^(.+?)\s+(?:at|@)\s+(.+)$", company)
         if at:
@@ -325,11 +383,18 @@ def _experience(lines: list[str], warnings: list[str]) -> list[dict]:
                       "start_date": start, "end_date": end, "highlights": [], "_pending_title": ""})
         i += 1
     out = []
-    for r in roles:
+    for n, r in enumerate(roles):
         r.pop("_pending_title", None)
         if not r["title"]:
             r["title"] = "Role"
             warnings.append(f"No job title found for {r['company']}; please fill it in.")
+            uncertain.append(f"experience.{n}.title")
+        elif not _looks_like_title(r["title"]):
+            uncertain.append(f"experience.{n}.title")          # read, but it doesn't look like a job title
+        if r["company"] == "Unknown company" or _looks_like_title(r["company"]):
+            uncertain.append(f"experience.{n}.company")
+        if not r["highlights"]:
+            uncertain.append(f"experience.{n}.highlights")
         if r["end_date"] and r["end_date"] < r["start_date"]:
             r["end_date"] = None
         if not r["location"]:

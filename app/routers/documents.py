@@ -8,7 +8,10 @@ from pydantic import BaseModel, ValidationError
 from app import drafting, repository, resume_render, tailoring
 from app.errors import ConflictError
 from app.dependencies import get_connection
-from app.preparation import Preparation
+from typing import Literal
+
+from app.dependencies import preparer
+from app.preparation import STEPS, Preparation
 from app.schemas import DocumentEdit, DocumentOut, DraftRequest
 
 router = APIRouter(tags=["materials"])
@@ -51,18 +54,27 @@ def _make_draft(conn, llm, application_id: int, kind: str, question: str = "", p
     return repository.add_document(conn, application_id, kind, question, text, "ai", llm.model, draft_review.model_dump())
 
 
+class PrepareRequest(BaseModel):
+    steps: list[Literal["resume", "cover_letter"]] | None = None    # default: both
+
+
 @router.post("/applications/{application_id}/prepare", response_model=Preparation, status_code=202,
              responses={404: {"description": "Application not found"}})
-def start_preparation(application_id: Id, request: Request, conn: Conn):
-    """Make the tailored resume and the cover letter in the background. Check progress with GET."""
+def start_preparation(application_id: Id, request: Request, conn: Conn, body: PrepareRequest | None = None):
+    """Make the tailored resume and/or the cover letter in the background. Check progress with GET.
+
+    Starting again while a run is queued or running returns that run: a refresh or a double click never starts
+    a second one. ``steps`` retries one document (e.g. ["cover_letter"] after the letter failed)."""
     repository.get_application(conn, application_id)
-    return request.app.state.preparer.start(application_id)
+    steps = tuple(dict.fromkeys(body.steps)) if body and body.steps else STEPS
+    return preparer(request).start(application_id, steps)
 
 
 @router.get("/applications/{application_id}/prepare", response_model=Preparation)
 def preparation_status(application_id: Id, request: Request):
-    """How far the background preparation got: idle, queued, running (with the step), done or failed."""
-    return request.app.state.preparer.get(application_id)
+    """How far the background preparation got: idle, queued, running (with the step), done or failed.
+    Reading it never calls the model."""
+    return preparer(request).get(application_id)
 
 
 @router.get("/applications/{application_id}/documents", response_model=list[DocumentOut])
@@ -86,14 +98,43 @@ def save_edit(document_id: Id, body: DocumentEdit, conn: Conn):
                                    "user_edit", None, review)
 
 
-@router.get("/documents/{document_id}/print", response_class=HTMLResponse,
-            responses={404: {"description": "Not found"}, 409: {"description": "Not a resume"}})
-def print_resume(document_id: Id, conn: Conn):
-    """Printable page for a tailored resume. In the browser: File > Print > Save as PDF."""
+_KIND_NAME = {"resume": "Resume", "cover_letter": "Cover letter", "screening_answer": "Screening answer",
+              "application_plan": "Application plan"}
+
+
+def _text_page(text: str, title: str) -> str:
+    import html
+    paras = "".join(f"<p>{html.escape(p).replace(chr(10), '<br>')}</p>" for p in text.split("\n\n") if p.strip())
+    return (f"<!doctype html><html lang='en'><head><meta charset='utf-8'><title>{html.escape(title)}</title><style>"
+            "body{font-family:Georgia,serif;font-size:11.5pt;line-height:1.45;max-width:7in;margin:0.8in auto;"
+            "color:#111}@page{size:letter;margin:0.8in}@media print{body{margin:0}}</style></head>"
+            f"<body>{paras}</body></html>")
+
+
+@router.get("/documents/{document_id}/download", responses={404: {"description": "Not found"}})
+def download(document_id: Id, conn: Conn):
+    """The document as a plain-text file (a resume as its printed text)."""
+    from fastapi.responses import Response
+    import re as _re
     doc = repository.get_document(conn, document_id)
-    if doc.kind != "resume":
-        raise ConflictError("Only resumes have a printable page.")
     app = repository.get_application(conn, doc.application_id)
+    text = doc.content
+    if doc.kind == "resume":
+        text = tailoring.resume_plain_text(tailoring.TailoredResume.model_validate_json(doc.content))
+    name = _re.sub(r"[^A-Za-z0-9]+", "-", f"{_KIND_NAME.get(doc.kind, 'document')}-{app.company}-v{doc.version}")
+    return Response(text, media_type="text/plain; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name.strip("-").lower()}.txt"'})
+
+
+@router.get("/documents/{document_id}/print", response_class=HTMLResponse,
+            responses={404: {"description": "Not found"}})
+def print_resume(document_id: Id, conn: Conn):
+    """Printable page for a document (the formatted resume, or a letter). In the browser: Print > Save as PDF."""
+    doc = repository.get_document(conn, document_id)
+    app = repository.get_application(conn, doc.application_id)
+    if doc.kind != "resume":
+        return HTMLResponse(_text_page(doc.content, f"{_KIND_NAME.get(doc.kind, 'Document')} · {app.job_title} at "
+                                                    f"{app.company}"))
     resume = tailoring.TailoredResume.model_validate_json(doc.content)
     return resume_render.render(resume, app.job_title, app.company)
 

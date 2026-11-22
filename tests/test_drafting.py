@@ -58,8 +58,8 @@ def test_claiming_a_missing_skill_is_flagged(client, fake_llm, app_id):
 
 
 def test_unknown_or_missing_citations_are_flagged(client, fake_llm, app_id):
-    fake_llm.answer = {"text": "Some text.", "fact_ids_used": ["F999"]}
-    warnings = draft(client, app_id).json()["review"]["warnings"]
+    fake_llm.answer = {"text": "I built a pytest suite for a payments API.", "fact_ids_used": ["F999"]}
+    warnings = draft(client, app_id, kind="screening_answer", question="What do you test?").json()["review"]["warnings"]
     assert any("F999" in w for w in warnings)
     assert any("did not say which" in w for w in warnings)
 
@@ -78,9 +78,9 @@ def test_unanswerable_question_returns_questions_for_you(client, fake_llm, app_i
 
 
 def test_versions_are_kept_and_edits_create_new_version(client, fake_llm, app_id):
-    fake_llm.answer = {"text": "First draft.", "fact_ids_used": ["F1"]}
+    fake_llm.answer = {"text": "I built a pytest suite.", "fact_ids_used": ["F1"]}      # first draft
     first = draft(client, app_id).json()
-    fake_llm.answer = {"text": "Second draft.", "fact_ids_used": ["F1"]}
+    fake_llm.answer = {"text": "I reproduced production issues using Docker.", "fact_ids_used": ["F1"]}
     second = draft(client, app_id).json()
     edited = client.post(f"/documents/{second['id']}/versions", json={"content": "My edited letter."})
     assert edited.status_code == 201
@@ -89,7 +89,7 @@ def test_versions_are_kept_and_edits_create_new_version(client, fake_llm, app_id
 
     docs = client.get(f"/applications/{app_id}/documents").json()
     assert docs[0]["content"] == "My edited letter."
-    assert "Second draft." in docs[1]["content"] and "First draft." in docs[2]["content"]
+    assert "reproduced production issues" in docs[1]["content"] and "I built a pytest suite." in docs[2]["content"]
 
 
 def test_screening_answers_are_versioned_per_question(client, fake_llm, app_id):
@@ -294,13 +294,15 @@ def test_unused_relevant_facts_complete_a_short_letter_and_invented_additions_ar
         {"fixes": [], "additions": [
             {"text": "I also led a team of 12 engineers migrating services to Kubernetes on AWS.", "fact_ids": ["F5"]},
             {"text": "I wrote manual and automated regression tests for a web application, so releases were "
-                     "checked end to end before customers saw them.", "fact_ids": ["F7"]},
+                     "checked end to end before customers saw them.", "fact_ids": ["F7"]},   # invented audience
+            {"text": "I also wrote manual and automated regression tests for a web application.", "fact_ids": ["F7"]},
         ]},
     ]
     doc = draft(client, app_id).json()
     assert "ADD" in fake_llm.calls[1]["user"]
     assert "12 engineers" not in doc["content"]                         # invented: never added
-    assert "regression tests for a web application" in doc["content"]   # retold from a real fact
+    assert "customers saw them" not in doc["content"]                   # an audience its record doesn't name
+    assert "regression tests for a web application" in doc["content"]   # the addition its record backs
     assert doc["review"]["humanizer"]["revision_rounds"] == 1
 
 

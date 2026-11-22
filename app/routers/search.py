@@ -123,7 +123,9 @@ def apply(body: ApplyRequest, request: Request, conn: Conn):
                          "Materials for a resume tailored to the real requirements.")
         if len(description.strip()) < 20:
             description = f"{title} at {company} ({location}). Full description: {url}"
-        info = job_intake.intake(description, url, request.app.state.llm, known_title=title)
+        # title and company come from the search result: the model is asked only if the skills are thin
+        info = job_intake.intake(description, url, request.app.state.llm, known_title=title,
+                                 known={"company": (company, "job search")} if company else None)
         notes += [n for n in info.notes if "No job title" not in n and "No company" not in n]
         try:
             job = repository.create_job(conn, JobCreate(
@@ -148,6 +150,7 @@ def apply(body: ApplyRequest, request: Request, conn: Conn):
     if {"resume", "cover_letter"} <= kinds:
         prep = "done"
     else:
-        prep = request.app.state.preparer.start(app_id).state
+        from app.dependencies import preparer
+        prep = preparer(request).start(app_id).state
     return ApplyOut(job_id=job_id, application_id=app_id, apply_url=url, new_job=new_job,
                     new_application=new_app, notes=notes, preparation=prep)

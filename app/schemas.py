@@ -218,6 +218,9 @@ class JobQuickAdd(StrictModel):
 
     url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=500)] | None = None
     description: Annotated[str, StringConstraints(strip_whitespace=True, max_length=20_000)] | None = None
+    # typed by you: kept exactly, never replaced by what is read from the posting
+    title: Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)] | None = None
+    company: Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)] | None = None
     use_ai: bool = True
     allow_duplicate: bool = False
 
@@ -376,6 +379,8 @@ class ApplicationOut(BaseModel):
     updated_at: datetime
     history: list[ApplicationEvent]
     allowed_next: list[ApplicationStatus] = []
+    documents_ready: list[str] = []          # document kinds saved for it ("resume", "cover_letter"), not a status
+    last_activity: datetime | None = None    # latest of: status change, notes, a document version
 
 
 # ---------------------------------------------------------------------------

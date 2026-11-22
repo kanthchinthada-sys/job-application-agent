@@ -49,11 +49,16 @@ class E2EFakeLLM:
 
     def __init__(self):
         self.offline = False
+        self.intake_gate = None        # a threading.Event: reading a job posting waits for it (a slow model)
+        self.intake_answer = None
 
     def generate_json(self, system, user, schema):
         if self.offline:
             raise LLMUnavailableError("Cannot reach Ollama at http://localhost:11434. Is the Ollama app running?")
         props = schema.get("properties", {})
+        if "company" in props and self.intake_gate is not None:
+            self.intake_gate.wait(20)
+            return self.intake_answer or {}
         if "bullets" in props:
             return {"bullets": []}
         if "sentences" in props:

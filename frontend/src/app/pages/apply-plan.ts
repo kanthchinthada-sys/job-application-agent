@@ -61,7 +61,7 @@ const SOURCE_LABEL: Record<string, string> = {
             }
           </tbody>
         </table>
-        <button class="primary" type="button" (click)="approve()">Save my answers and approve</button>
+        <button class="secondary" type="button" (click)="approve()">Save my answers and approve</button>
         <app-msg [msg]="approveMsg()" />
         @if (p.approved) {
           <div class="msg info">Approved. To fill the form, run this in the terminal (the app must be running):

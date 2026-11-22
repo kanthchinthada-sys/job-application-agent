@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS documents (
     UNIQUE (application_id, kind, question, version)
 );
 
+-- The latest document generation run per application, so a restart can tell what was interrupted.
+CREATE TABLE IF NOT EXISTS generation_runs (
+    application_id  INTEGER PRIMARY KEY REFERENCES applications(id),
+    data            TEXT NOT NULL,            -- JSON: preparation.Preparation
+    updated_at      TEXT NOT NULL
+);
+
+-- Adding a job: what the model was asked to resolve after the job was saved, and what it changed or left
+-- alone because you had corrected it (app/intake_runs.py).
+CREATE TABLE IF NOT EXISTS intake_runs (
+    job_id          INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    data            TEXT NOT NULL,            -- JSON
+    updated_at      TEXT NOT NULL
+);
+
 -- Append-only history: every status change is recorded with its timestamp.
 CREATE TABLE IF NOT EXISTS application_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

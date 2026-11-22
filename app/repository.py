@@ -203,6 +203,11 @@ def _row_to_application(conn, row: sqlite3.Row) -> ApplicationOut:
         updated_at=row["updated_at"],
         history=[dict(e) for e in events],
         allowed_next=allowed_next(ApplicationStatus(row["status"])),
+        documents_ready=[r[0] for r in conn.execute(
+            "SELECT DISTINCT kind FROM documents WHERE application_id = ? AND kind IN ('resume', 'cover_letter') "
+            "ORDER BY kind DESC", (row["id"],))],
+        last_activity=max([row["updated_at"]] + [r[0] for r in conn.execute(
+            "SELECT MAX(created_at) FROM documents WHERE application_id = ?", (row["id"],)) if r[0]]),
     )
 
 

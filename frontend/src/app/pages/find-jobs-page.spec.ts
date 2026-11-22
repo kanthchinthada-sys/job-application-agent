@@ -39,7 +39,7 @@ describe('FindJobsPage', () => {
                 sources: [{ name: 'Remotive', ok: true, found: 4, kept: 1, note: '' },
                           { name: 'Adzuna', ok: false, found: 0, kept: 0, note: 'Off: add a free key.' }] });
     await settle(fixture);
-    expect(text(fixture)).toContain('1 jobs found in Canada');
+    expect(text(fixture)).toContain('1 jobs in Canada');
     expect(text(fixture)).toContain('Remote (worldwide)');
     expect(text(fixture)).toContain('Adzuna: Off: add a free key.');
   });
