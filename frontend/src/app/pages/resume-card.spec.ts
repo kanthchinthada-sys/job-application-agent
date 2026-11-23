@@ -37,4 +37,31 @@ describe('ResumeCard (review details)', () => {
     expect(map).toContain('✗ sql');
     expect(map).toContain('Not scored (people skills and ways of working, not technical keywords): curiosity · hybrid working policy');
   });
+
+  it('keeps the record behind each summary sentence, Core Skills line and reworded bullet in the private review', async () => {
+    const resume = {
+      id: 22, application_id: 7, kind: 'resume', question: '', version: 1, source: 'ai', created_at: '2026-11-14T10:00:00',
+      content: JSON.stringify({
+        summary: 'Built Java test automation (fictional).', skills: ['REST Assured'],
+        experience: [{ company: 'Example Corp', bullets: [{ text: 'Built Java API checks (fictional).',
+                       original: 'Developed Java API checks (fictional).', changed: true, source_id: 'EX01' }] }] }),
+      review: {
+        warnings: [], notes: [], tailoring: {}, keywords_added: [],
+        summary_checks: [{ item: 'frameworks', decision: 'kept', sentence: 'Built Java test automation (fictional).',
+                           records: [{ id: 'EX01', text: 'Developed Java API checks (fictional).' }], unsupported: [], style: [] }],
+        core_skills: [{ line: 'API testing', skill: 'REST Assured', why: 'required: API testing (fictional)', records: ['EX01'] }],
+      },
+    };
+    setup([ResumeCard]);
+    const fixture = TestBed.createComponent(ResumeCard);
+    fixture.componentRef.setInput('versions', [resume]);
+    fixture.detectChanges();
+    await settle(fixture);
+    const all = text(fixture);
+    expect(all).toContain('Where each summary sentence comes from');
+    expect(all).toContain('records EX01');
+    expect(all).toContain('Core Skills: why each skill is listed');
+    expect(all).toContain('required: API testing (fictional) · records EX01');
+    expect(all).toContain('Example Corp · record EX01');
+  });
 });

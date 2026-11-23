@@ -119,12 +119,12 @@ def test_the_summary_is_framed_for_the_job_and_drops_a_sentence_that_copies_a_bu
     good = ("Led defect triage and shared release risks with business stakeholders and clients through regular "
             "updates (fictional).")
     summary, bullets, review = _lead_resume(client, fake_llm, {"bullets": [], "sentences": [
-        {"id": "T1", "text": opening}, {"id": "T2", "text": good}]})
+        {"id": "T1", "text": opening}, {"id": "T3", "text": good}]})        # T3: the defect-triage ask
     assert summary.startswith("Quality engineer with 9+ years") and "focused on test strategy" in summary
     assert good in summary                                                  # a valid rewording is kept
     copy = "Defined test strategies, closure criteria and testing priorities (fictional)."
     summary, bullets, review = _lead_resume(client, fake_llm, {"bullets": [], "sentences": [
-        {"id": "T1", "text": opening}, {"id": "T2", "text": copy}]})
+        {"id": "T1", "text": opening}, {"id": "T2", "text": copy}]})        # T2: the test-strategy ask
     assert copy not in summary                                              # it only repeated a bullet
     entry = next(c for c in review["summary_checks"] if c["ai_sentence"] == copy)
     assert entry["style"] == ["repeats a bullet"] and entry["unsupported"] == []   # style, not an invented claim
@@ -137,3 +137,63 @@ def test_different_postings_change_the_evidence_not_just_the_keywords():
     assert tops[0] != tops[1]
     assert lead.selected["Northwind Bank"][0] in {"NB01", "NB02"}       # the lead role opens with leadership work
     assert {fde.family, sdet.family, lead.family} == {"fde_app", "sdet", "lead"}
+
+
+# ---------- the summary answers what the job mainly asks (5-6 sentences, at least 6 printed lines) ----------
+
+DUTIES_JOB = job("Senior Quality Engineer", (
+    "About This Role\nAs a Senior Quality Engineer you will join a delivery team (fictional).\n"
+    "Location: Remote (Springfield)\nEmployment type: Permanent, full-time\n"
+    "These are some of the key components to the position:\n"
+    "Coach and mentor the team for best test practices.\n"
+    "Define the test strategy and test planning for each release.\n"
+    "Lead defect triage with the developers.\n"
+    "What will you bring to the team?\n"
+    "Java test automation for REST APIs (tools like Postman are a plus)\n"
+    "Release risks reporting to stakeholders\n\nBenefits\nGood."))
+
+
+def test_a_location_line_does_not_hide_the_duties_and_a_question_heading_starts_the_requirements():
+    from app import posting
+    req, pref, duties = posting.requirement_lines(DUTIES_JOB.description)
+    assert "Coach and mentor the team for best test practices." in duties
+    assert any(l.startswith("Define the test strategy") for l in duties)
+    assert any(l.startswith("Java test automation") for l in req)          # "(... are a plus)" is only the tools
+    assert not any("Java test automation" in l for l in pref + duties)
+    assert not any("Employment type" in l for l in req + pref + duties)
+
+
+def test_the_summary_gives_each_main_ask_its_own_sentence_including_mentoring():
+    from app import tailoring
+    p = with_bank()
+    plan = selection.plan(p, DUTIES_JOB)
+    _, items, *_ = tailoring.summary_items(p, DUTIES_JOB, plan)
+    main = [name for name, _ in items if name != tailoring.OPENING and not name.startswith(tailoring.RESERVE)]
+    assert len(main) >= 3, main
+    assert all("the job asks: " in name for name in main if not name.startswith("proof point"))
+    assert any("mentor" in name.lower() for name in main), main            # a listed coaching duty is a main ask
+    assert not any(";" in name.split("the job asks:")[1] for name in main if "the job asks:" in name)
+
+
+def test_the_summary_is_at_least_six_lines_when_the_records_allow(client, fake_llm):
+    from app import tailoring
+    p = with_bank()
+    _, items, *_ = tailoring.summary_items(p, LEAD_JOB, selection.plan(p, LEAD_JOB))
+    # an AI sentence for every item (each restating its own records, so the claim checks pass)
+    sentences = [{"id": f"T{i + 1}", "text": c[0]} for i, (_, c) in enumerate(items)]
+    summary, bullets, review = _lead_resume(client, fake_llm, {"bullets": [], "sentences": sentences})
+    count = len([x for x in summary.split(". ") if x.strip()])
+    assert 5 <= count <= 6 or tailoring.summary_lines(summary) >= tailoring.SUMMARY_MIN_LINES, summary
+    assert count <= tailoring.SUMMARY_SENTENCES[1]
+
+
+def test_a_summary_sentence_cannot_claim_scope_or_design_that_built_records_dont_state():
+    from app.tailoring import summary_claim_problems
+    p = with_bank()
+    records = ["Built a TypeScript front end connected through FastAPI endpoints (fictional).",
+               "Built a local job-application agent using Python, FastAPI and SQLite (fictional)."]
+    kinds = lambda s: [x["kind"] for x in summary_claim_problems(s, records, p, LEAD_JOB)]
+    assert "scope" in kinds("Built everything at enterprise scale for the whole company.")
+    assert "ownership" in kinds("Designed a TypeScript front end connected through FastAPI endpoints.")
+    # a paraphrase in other words is fine
+    assert kinds("Created a local job-application agent in Python with a TypeScript front end over FastAPI.") == []

@@ -283,6 +283,16 @@ def _words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9][a-z0-9+#./-]*", text.lower()) if len(w) > 3}
 
 
+_ACHIEVE_VERBS = {"built", "developed", "designed", "led", "created", "implemented", "investigated", "diagnosed",
+                  "isolated", "debugged", "troubleshot", "reduced", "improved", "automated", "integrated", "migrated",
+                  "established", "defined", "reproduced", "resolved", "validated", "configured", "deployed"}
+_TALK_VERBS = {"documented", "presented", "communicated", "demonstrated", "shared", "participated", "attended",
+               "worked", "collaborated", "contributed", "assisted", "supported", "helped"}
+# everyday practice, not an achievement: fine as a bullet only when nothing stronger fits
+_ROUTINE_WORK = re.compile(r"\b(feature branches|commits|merge requests|pull requests|stand-?ups?|tickets?|"
+                           r"participated|attended)\b", re.IGNORECASE)
+
+
 def plan(profile: Profile, job: JobOut) -> Plan:
     from app import scorecard
     fam = scorecard.family(job.title, job.description)
@@ -367,6 +377,24 @@ def plan(profile: Profile, job: JobOut) -> Plan:
             if any(_in_range(rid, spec) for spec in settings.role_priority.get(role, [])):
                 b += 1.5 if rank == 0 else 0.75
         return b
+
+    lead_family = fam.name in ("lead", "data_lead")
+
+    def action(rid: str) -> float:
+        """How much a bullet shows you DOING the work: what you built, led, tested or diagnosed (and a measured
+        result) counts more than a matching tool name; talking about work and routine practice count less."""
+        r = by_id.get(rid)
+        if r is None:
+            return 0.0
+        verb = scorecard.first_verb(r.text)
+        v = 0.5 * scorecard.proof(r.text)[0]
+        if verb in _ACHIEVE_VERBS:
+            v += 1.5
+        elif verb in _TALK_VERBS:
+            v -= 0.5 if lead_family else 2.5
+        if _ROUTINE_WORK.search(r.text):
+            v -= 3.0
+        return v
 
     def relevance(rid: str) -> float:
         best: dict[str, float] = {}
@@ -513,13 +541,34 @@ def plan(profile: Profile, job: JobOut) -> Plan:
 
     def must_direct(rid: str) -> int:       # direct evidence of a required qualification leads its role
         # a specific match (a part that is not in a large share of your bullets) to a hard required line
+        # (a technical part: "maintainability" in "... with a focus on quality and maintainability" is not one)
         return int(any(reqs[qi].kind == "required" and qi not in soft and not SOFT.search(part) and v == DIRECT
-                       and part_rarity[part] >= 0.5
+                       and part_rarity[part] >= 0.5 and part in tech_parts[qi]
                        for qi, parts in hits.get(rid, {}).items() for part, v in parts.items()))
 
-    for rid in sorted(chosen, key=lambda x: (core_first(x), -(4 * must_direct(x) + relevance(x) + boost(x)),
-                                             position[x])):
+    tech_parts = {qi: set(technical_parts(q, vocab)) | {p for p in q.parts if p in ev.RELATED and not SOFT.search(p)}
+                  for qi, q in enumerate(reqs)}
+    value = {rid: relevance(rid) + boost(rid) + action(rid) for rid in chosen}
+    for rid in sorted(chosen, key=lambda x: (core_first(x), -(4 * must_direct(x) + value[x]), position[x])):
         selected.setdefault(by_id[rid].owner, []).append(rid)
+
+    # each bullet a distinct purpose: one that proves only what a stronger bullet in the same role already proves
+    # (the same specific requirement parts) goes to the end of its role, and the page fitting trims it before a
+    # relevant achievement from an older role
+    def proves(rid: str) -> set[tuple[int, str]]:
+        return {(qi, part) for qi, parts in hits.get(rid, {}).items() if qi not in soft
+                for part in parts if part_rarity.get(part, 0) >= 0.5 and not SOFT.search(part)}
+    redundant: set[str] = set()
+    for owner, ids in selected.items():
+        seen: set[tuple[int, str]] = set()
+        for rid in ids:
+            mine = proves(rid)
+            if mine and mine <= seen and rid not in protected:
+                redundant.add(rid)
+            seen |= mine
+        selected[owner] = [i for i in ids if i not in redundant] + [i for i in ids if i in redundant]
+    for rid in redundant:
+        value[rid] -= 2.5
 
     # --- report --------------------------------------------------------------------------------
     bank_texts = [(r.id, r.text) for r in records]
@@ -604,7 +653,7 @@ def plan(profile: Profile, job: JobOut) -> Plan:
         role_types=role_types, role_scores=role_scores, requirements=reqs, selected=selected, rows=rows,
         gaps=gaps, excluded_by_status=list(dict.fromkeys(excluded)), removed_as_duplicate=duplicates,
         caveats={rid: by_id[rid].caveat for rid in chosen if by_id[rid].caveat}, eligibility=eligibility,
-        scores={rid: round(relevance(rid) + boost(rid) + (50 if rid in protected else 0), 2) for rid in chosen},
+        scores={rid: round(value[rid] + (50 if rid in protected else 0), 2) for rid in chosen},
         family=fam.name, why={rid: role_pts[rid][1] for rid in chosen if role_pts.get(rid, (0, []))[1]},
     )
 

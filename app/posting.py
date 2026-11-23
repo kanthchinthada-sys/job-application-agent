@@ -42,7 +42,8 @@ _REQUIRED = re.compile(
 _DUTIES = re.compile(
     r"\b(do|doing|responsibilit(y|ies)|assignment|impact|the role|your role|in this role|you will|you'?ll|own|"
     r"day[\s-]to[\s-]day|deliver|accountabilit(y|ies)|opportunity|mission|projects|duties|the job|overview|"
-    r"summary|what you will)\b", re.IGNORECASE)
+    r"summary|what you will|(key |main |core )?components|the position|(key |main |core )?duties|"
+    r"what the (role|job|position) involves|key areas)\b", re.IGNORECASE)
 _INLINE_PREFERRED = re.compile(r"\b(nice to have|is a plus|a plus|are a plus|bonus|preferred|desirable|ideally|"
                                r"added advantage|an advantage|not required)\b", re.IGNORECASE)
 _BULLET = re.compile(r"^\s*(?:[-•*·▪◦●○■□➢➤►–—]|\d+[.)])\s*")
@@ -107,7 +108,7 @@ def sections(description: str) -> list[tuple[str, str, list[str]]]:
             # section ("Nice to have" inside the requirements); otherwise it's a requirement written plainly
             in_section = kind in ("required", "preferred", "duties")
             # ...but a bare one-to-three word line ("Required", "Must have") is always a sub-heading
-            if (k is not None and not line.endswith(":") and in_section and len(line.split()) > 3
+            if (k is not None and not line.endswith((":", "?")) and in_section and len(line.split()) > 3
                     and (k == kind or len(line.split()) > 6)):
                 out[-1][2].append(_BULLET.sub("", line))
                 continue
@@ -130,7 +131,8 @@ def sections(description: str) -> list[tuple[str, str, list[str]]]:
             out.append(("ignore", "(where and how you work)", [text]))
             out.append((kind, "", []))
             continue
-        if kind == "required" and _INLINE_PREFERRED.search(text):
+        # "... API testing (tools like Postman are a plus)": only the bracketed tools are optional, not the line
+        if kind == "required" and _INLINE_PREFERRED.search(re.sub(r"\([^)]*\)", "", text)):
             out.append(("preferred", "(said to be optional)", [text]))
             out.append(("required", "", []))
             continue

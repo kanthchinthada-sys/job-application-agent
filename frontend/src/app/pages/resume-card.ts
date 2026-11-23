@@ -6,7 +6,7 @@ import { Api, ApiError } from '../api';
 
 import { Doc } from '../models';
 
-interface Bullet { text: string; original?: string; changed?: boolean; rejected_reason?: string; }
+interface Bullet { text: string; original?: string; changed?: boolean; rejected_reason?: string; source_id?: string | null; }
 interface Role { company: string; bullets: Bullet[]; }
 interface TailoredResume { summary: string; summary_source?: string; skills: string[]; experience: Role[]; }
 
@@ -141,12 +141,26 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
           }
         </details>
       }
+      @if (summarySources(r).length) {
+        <details class="small" data-testid="summary-sources"><summary>Where each summary sentence comes from</summary>
+          @for (c of summarySources(r); track $index) {
+            <div class="claim">“{{ c.sentence }}” <span class="muted">· records {{ recordIds(c.records) }}</span></div>
+          }
+        </details>
+      }
+      @if (r.core_skills?.length) {
+        <details class="small" data-testid="core-skills-evidence"><summary>Core Skills: why each skill is listed</summary>
+          @for (s of r.core_skills; track $index) {
+            <div><b>{{ s.line }}:</b> {{ s.skill }} <span class="muted">· {{ s.why }}{{ s.records?.length ? ' · records ' + s.records.join(', ') : '' }}</span></div>
+          }
+        </details>
+      }
       <p class="small"><b>Skills order:</b> {{ cv.skills.slice(0, 12).join(' · ') }}{{ cv.skills.length > 12 ? ' …' : '' }}</p>
       <a class="button" [href]="'/documents/' + d.id + '/print'" target="_blank" rel="noopener">Print / Save as PDF</a>
       @if (changed().length) {
         <details open><summary>Reworded bullets ({{ changed().length }}): compare with your original</summary>
           @for (c of changed(); track $index) {
-            <div class="small"><span class="muted">{{ c.company }}</span><br><b>New:</b> {{ c.b.text }}<br>
+            <div class="small"><span class="muted">{{ c.company }}{{ c.b.source_id ? ' · record ' + c.b.source_id : '' }}</span><br><b>New:</b> {{ c.b.text }}<br>
               <span class="muted"><b>Original:</b> {{ c.b.original }}</span></div>
           }
         </details>
@@ -261,6 +275,12 @@ export class ResumeCard {
   /** Summary sentences the checks changed (written without AI, trimmed or left out), with the reasons. */
   protected recordIds(records: { id: string }[]): string {
     return records.map(r => r.id).join(', ');
+  }
+
+  /** Summary sentences on the resume, each with the records it was written from. */
+  protected summarySources(r: any): any[] {
+    return (r?.summary_checks ?? []).filter((c: any) => c.sentence && c.records?.length
+      && !String(c.decision).startsWith('left out') && !String(c.decision).includes('(reserve)'));
   }
 
   protected summaryChecks(r: any): any[] {

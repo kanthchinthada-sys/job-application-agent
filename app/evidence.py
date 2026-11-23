@@ -177,6 +177,9 @@ RELATED: dict[str, list[str]] = {
     # frameworks are written; Playwright/Selenium suites are end-to-end tests; GitHub/Bitbucket are Git
     "oop principles": ["object-oriented", "oop", "page object", "java", "c#", "kotlin", "typescript"],
     "end-to-end testing": ["end-to-end", "e2e", "playwright", "selenium", "cypress", "webdriverio"],
+    # building web applications (not testing them): an application you built with a web front end or API
+    "web applications": ["web application", "web app", "frontend", "front end", "fastapi", "angular", "react",
+                         "spring boot"],
     "prompt engineering": ["prompt engineering", "prompt", "prompts", "prompt-regression"],
     "mcp": ["mcp", "model context protocol"],
     "git": ["git", "github", "gitlab", "bitbucket"],
@@ -397,7 +400,10 @@ def _find_part(part: str, lowered: list[tuple[str, str, str]]) -> Evidence | Non
         if form:
             return Evidence(part=part, via=form, source=src, text=txt, related=False)
     for src, txt, low in lowered:
-        via = next((r for r in RELATED.get(part, []) if _has(low, r)), None)
+        # a related word inside a hyphenated name is not that word: "client" in "client-go" or
+        # "Kubernetes-client" is a library, not a client of the business
+        via = next((r for r in RELATED.get(part, [])
+                    if re.search(rf"(?<![\w-]){re.escape(r.lower().strip())}(?![\w-])", low)), None)
         if via:
             return Evidence(part=part, via=via.strip(), source=src, text=txt, related=True)
     if len(_content_words(part)) >= 2:

@@ -219,7 +219,7 @@ def test_fitting_the_page_never_swaps_out_a_skill_the_job_asks_for():
     assert "end-to-end testing" in kept and "debugging" in kept and "Selenium" in kept
 
 
-def test_a_summary_with_failed_sentences_stays_two_or_three_sentences_and_says_why():
+def test_a_summary_with_failed_sentences_stays_within_six_sentences_and_says_why():
     from app import tailoring
     from tests.test_bank import with_bank, SDET_JOB
     p = with_bank()
@@ -233,8 +233,9 @@ def test_a_summary_with_failed_sentences_stays_two_or_three_sentences_and_says_w
     summary, notes = tailoring._finish_summary(wp, SDET_JOB, own, items, from_project, use_ai, ai_sentence,
                                                answers, [], None, checks)
     n = len(re.split(r"(?<=[.!?])\s+", summary))
-    assert 2 <= n <= 3, summary
-    assert "enterprise scale" not in summary
+    assert 2 <= n <= tailoring.SUMMARY_SENTENCES[1], summary
+    assert "enterprise scale" not in summary and "owned everything" not in summary
+    assert not re.search(r"\b(with|from|for|and|connected)\.", summary), summary   # clauses end on whole phrases
     flagged = [c for c in checks if c["item"] != "opening"]
     assert flagged and all(c["unsupported"] for c in flagged)              # recorded as unsupported claims
     assert any(u["kind"] == "ownership" for c in flagged for u in c["unsupported"])

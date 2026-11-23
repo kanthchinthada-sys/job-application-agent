@@ -56,7 +56,7 @@ OUTCOME_KINDS = {
 }
 OUTCOMES = re.compile(r"\b(" + "|".join(OUTCOME_KINDS.values()) + r")\b", re.IGNORECASE)
 KINDS = ("tool", "metric", "employer", "leadership", "ownership", "outcome", "audience", "responsibility",
-         "tool_context", "posting_duty")
+         "tool_context", "posting_duty", "scope")
 
 # who the work was for or with: a sentence may name an audience only if its records do
 AUDIENCE = re.compile(r"\b(customers?|clients?|end[- ]users?|stakeholders?|executives?|partners?|vendors?|patients?|"
