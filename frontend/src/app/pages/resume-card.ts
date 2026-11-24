@@ -172,7 +172,7 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
         </details>
       }
       <p class="small"><b>Skills order:</b> {{ cv.skills.slice(0, 12).join(' · ') }}{{ cv.skills.length > 12 ? ' …' : '' }}</p>
-      <a class="button" [href]="'/documents/' + d.id + '/print'" target="_blank" rel="noopener">Print / Save as PDF</a>
+      <a class="button" [href]="'/documents/' + d.id + '/pdf'" download>Download PDF</a>
       @if (changed().length) {
         <details open><summary>Reworded bullets ({{ changed().length }}): compare with your original</summary>
           @for (c of changed(); track $index) {

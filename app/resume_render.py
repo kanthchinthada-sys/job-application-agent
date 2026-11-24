@@ -151,7 +151,9 @@ SMART_JUSTIFY = r"""(function () {
     var base = lines(el);
     if (base.count < 2 || base.worst <= 3) return;
     var best = {ls: 0, ws: 0, worst: base.worst};
-    var LS = [-0.1, -0.2, 0.1, 0.2], WS = [0, -0.5, -1];
+    // never narrower spaces between words: in the saved PDF, text readers (and ATS parsers) would see
+    // "Jenkinsfailures" for "Jenkins failures"; only a hair of letter spacing, and wider word spacing
+    var LS = [-0.1, -0.2, -0.3, 0.1, 0.2], WS = [0];
     for (var a = 0; a < LS.length; a++) for (var b = 0; b < WS.length; b++) {
       el.style.letterSpacing = LS[a] + 'px'; el.style.wordSpacing = WS[b] + 'px';
       var t = lines(el);

@@ -26,7 +26,8 @@ interface Tailored { summary: string; experience: Role[]; [k: string]: unknown; 
       }
       <button class="secondary" type="button" (click)="copy()">Copy text</button>
       <a class="button" [href]="'/documents/' + d.id + '/download'" download>Download .txt</a>
-      <a class="button" [href]="'/documents/' + d.id + '/print'" target="_blank" rel="noopener" data-testid="print-resume">Print / Save as PDF</a>
+      <a class="button primary" [href]="'/documents/' + d.id + '/pdf'" download data-testid="download-pdf">Download PDF</a>
+      <a class="button" [href]="'/documents/' + d.id + '/print'" target="_blank" rel="noopener" data-testid="print-resume">Print</a>
       <button class="secondary" type="button" [disabled]="working()" (click)="regenerate.emit()">Generate new version</button>
     </div>
     <app-msg [msg]="msg()" />

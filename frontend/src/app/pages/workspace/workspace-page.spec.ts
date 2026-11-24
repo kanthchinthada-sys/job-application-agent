@@ -123,7 +123,7 @@ describe('DocumentsTab', () => {
     expect(text(fixture)).toContain('Backed by: EX03');
     expect(text(fixture)).toContain('I ran release suites (fictional).');
     expect(text(fixture)).toContain('no record it describes reports that result');
-    expect(text(fixture)).toContain('Print / Save as PDF');
+    expect(text(fixture)).toContain('Download PDF');
   });
 
   it('says when your profile changed after the draft', async () => {

@@ -904,6 +904,12 @@ def sentence_problems(sentence: str, facts: list[Fact], profile: Profile, job: J
     return found
 
 
+def _same_work(sentence: str, text: str) -> bool:
+    """The sentence retells work the text already tells (most of its words are there)."""
+    sw = _words(re.sub(r"^At [^,]+, I\b", "I", sentence))
+    return bool(sw) and len(sw & _words(text)) / len(sw) >= 0.6
+
+
 def _mentioned(fact: Fact, text: str) -> bool:
     """The letter already retells this fact (most of its words are in the letter)."""
     fw = _words(fact.text.split(": ", 1)[-1])
@@ -1236,6 +1242,10 @@ def _closing_line(job: JobOut, priorities: list["Priority"]) -> str:
     work = re.sub(r"^(the|a|an)\s+", "", work, flags=re.IGNORECASE)
     if not (2 <= len(work.split()) <= 6) or re.search(r"\d|\byears?\b", work):
         return f"I'd welcome the chance to talk about the {job.title} role."
+    from app.selection import KNOWN_TECH
+    tools = {t.lower() for t in KNOWN_TECH}
+    if work.lower() in tools or all(w.lower() in tools for w in re.split(r"\s*/\s*|\s+", work)):
+        return f"I'd welcome the chance to talk about how my {work} experience could help {job.company.rstrip('.')}."
     work = work[0].lower() + work[1:] if not re.match(r"[A-Z]{2}|[A-Z][a-z]+ [A-Z]", work) else work
     return f"I'd welcome the chance to talk about how I can help with {work}."
 
@@ -1252,7 +1262,8 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
     forms = employer_forms(profile)
     by_id = {f.id: f for f in facts}
     trimmed: list[str] = []
-    applying = f"I'm applying for the {job.title} role at {job.company}."
+    from app.job_search import clean_title
+    applying = f"I'm applying for the {clean_title(job.title)} role at {job.company.rstrip('.')}."
     rest_open = [x for x in opening if not re.search(r"\b(apply|applying)\b", x, re.IGNORECASE)
                  and job.company.lower() not in x.lower()][:1]
     # the opening's second sentence says what you do that fits; an example that names an employer ("At X, I ...")
@@ -1278,23 +1289,50 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
             continue
         by_priority.setdefault(idx, []).append((sentence, owner or ""))
         last = idx
-    # an example the AI's sentences lost: told from its strongest record; an example told in one sentence is
-    # completed from its next record (what else you did for the same priority), word for word
-    told_text = " ".join(x for para in by_priority.values() for x, _ in para)
+    # each example is ONE job's story: the most recent job with work for that priority (a job the other example
+    # does not already tell, when there is one), in up to two sentences from that job: the AI's sentences first,
+    # then that job's records word for word. Work from other jobs is left out, so the letter never hops between
+    # employers inside a paragraph, and an old job never leads while a recent one has the same kind of work.
+    from app.claims import owners_of
+    starts = {e.company: e.start_date or "" for e in profile.experience}
+
+    def recency(owner: str) -> tuple:
+        if owner == "project":
+            return (2, "")
+        return (0 if owner in starts else 1, "".join(chr(255 - ord(ch)) for ch in starts.get(owner, "")))
+
+    used: set[str] = set()
+    owner_of: dict[int, str] = {}
+    told_text = " ".join(rest_open)       # the opening already says this: never an example again
     for i, p in enumerate(priorities):
-        claims_ = [x for x in by_priority.get(i, []) if x[1]]
+        ai = [x for x in by_priority.get(i, []) if x[1] and not (told_text.strip() and _same_work(x[0], told_text))]
+        relevance = [x for x in by_priority.get(i, []) if not x[1]]
+        pool = list(ai)
         for f in p.fact_ids:
-            if len(claims_) >= 2 or f not in by_id or _mentioned(by_id[f], told_text):
+            if f not in by_id or _mentioned(by_id[f], " ".join(x for x, _ in pool) + " " + told_text):
                 continue
             told = _fact_sentence(by_id[f])
-            if not told:
-                continue
-            owner = _owner(told, facts, profile) or ""
-            claims_.append((told, owner))
-            told_text += " " + told
-        relevance = [x for x in by_priority.get(i, []) if not x[1]]
-        if claims_:
-            by_priority[i] = claims_ + relevance
+            if told:
+                told = plain_wording(told)
+                pool.append((told, _owner(told, facts, profile) or ""))
+        # only a job whose OWN records were chosen as evidence for this priority can tell it (a newer job's
+        # unrelated sentence never wins on recency); an employer before a personal project
+        evidence = {"project" if by_id[f].text.startswith("Project ") else next(iter(owners_of([by_id[f].text],
+                                                                                              profile)), "")
+                    for f in p.fact_ids if f in by_id}
+        owners = sorted({o for _, o in pool if o and o in evidence},
+                        key=lambda o: (o == "project", o in used, recency(o)))
+        if not owners:
+            by_priority[i] = relevance
+            continue
+        pick = owners[0]
+        used.add(pick)
+        owner_of[i] = pick
+        claims_ = [x for x in pool if x[1] == pick][:2]
+        trimmed += [x for x, o in ai if (x, o) not in claims_]
+        told_text += " " + " ".join(x for x, _ in claims_)
+        by_priority[i] = claims_ + relevance
+    order = sorted(range(len(priorities)), key=lambda i: (i not in owner_of, recency(owner_of.get(i, "project")), i))
 
     def short_name(owner: str) -> str:
         plain = re.sub(r"\s*\(.*?\)\s*$", "", owner).strip()
@@ -1306,7 +1344,8 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
     out = [" ".join([applying] + rest_open)]
     project_said = False
     project_sentences: list[str] = []
-    for i in range(len(priorities)):
+    last_owner = None             # a second example from the same job goes on from the first: "I also ..."
+    for i in order:
         para = by_priority.get(i, [])
         # personal-project work never shares a paragraph with work for an employer: it gets its own, after
         if any(o == "project" for _, o in para) and any(o and o != "project" for _, o in para):
@@ -1314,7 +1353,7 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
             para = [(x, o) for x, o in para if o != "project"]
         if not para:
             continue
-        text, prev = [], None
+        text, prev = [], last_owner
         for sentence, owner in para:
             if owner and owner != short_name(owner):
                 sentence = sentence.replace(f"At {owner},", f"At {short_name(owner)},")
@@ -1336,9 +1375,12 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
                 for f, name in forms.items():
                     if name == owner:
                         sentence = re.sub(rf"^At {re.escape(f)}(?: as [^,]+)?, I (?:also )?", "I ", sentence)
+            if not text and owner and owner != "project" and owner == last_owner:
+                sentence = re.sub(r"^I (?!also\b)", "I also ", sentence)
             text.append(sentence)
             prev = owner or prev
         out.append(" ".join(text))
+        last_owner = prev
     if project_sentences:
         out.append(" ".join(_project_paragraph(project_sentences, facts, profile)))
     close = [x for x in closing if _CLOSING.search(x) and not _FIRST_PERSON_CLAIM.search(re.sub(r"\bI'd\b", "", x))]

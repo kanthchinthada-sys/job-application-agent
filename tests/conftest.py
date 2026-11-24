@@ -106,3 +106,11 @@ def make_job(client, job_data):
         return response.json()
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _ai_resume_wording(monkeypatch, request):
+    """Most tests cover the AI-written resume path; the app's default (your lines exactly, no AI wording) is
+    covered by tests marked `exact_lines`."""
+    from app import tailoring
+    monkeypatch.setattr(tailoring, "EXACT_LINES", bool(request.node.get_closest_marker("exact_lines")))

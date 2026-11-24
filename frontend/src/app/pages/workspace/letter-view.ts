@@ -20,7 +20,8 @@ import { Msg, MsgBox } from '../../ui';
       }
       <button class="secondary" type="button" (click)="copy()">Copy text</button>
       <a class="button" [href]="'/documents/' + d.id + '/download'" download>Download .txt</a>
-      <a class="button" [href]="'/documents/' + d.id + '/print'" target="_blank" rel="noopener">Print / Save as PDF</a>
+      <a class="button primary" [href]="'/documents/' + d.id + '/pdf'" download data-testid="download-pdf">Download PDF</a>
+      <a class="button" [href]="'/documents/' + d.id + '/print'" target="_blank" rel="noopener">Print</a>
       <button class="secondary" type="button" [disabled]="working()" (click)="regenerate.emit()">Generate new version</button>
     </div>
     <app-msg [msg]="msg()" />

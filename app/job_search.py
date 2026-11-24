@@ -37,7 +37,7 @@ from urllib.parse import quote, quote_plus
 
 import httpx
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app import importers
 from app.preferences import CANADA_PLACES, check_title
@@ -124,6 +124,17 @@ COUNTRIES: dict[str, Country] = {c.code: c for c in [
 _WORLDWIDE = ["worldwide", "anywhere", "global", "remote - anywhere", "any location", "international"]
 
 
+# page text some job boards paste after the title: "QA Developer job details Quick apply for QA Developer"
+_TITLE_JUNK = re.compile(r"\s+(?:job details|quick apply|apply now|easy apply|job description)\b.*$", re.IGNORECASE)
+
+
+def clean_title(title: str) -> str:
+    """The job title alone, without board text appended to it ("job details", "Quick apply for ...")."""
+    t = re.sub(r"\s+", " ", title or "").strip()
+    cut = _TITLE_JUNK.sub("", t).strip(" -|·,")
+    return cut if len(cut) >= 2 else t
+
+
 class FoundJob(BaseModel):
     source: str
     title: str
@@ -138,6 +149,11 @@ class FoundJob(BaseModel):
     credit_url: str = ""             # the posting on the source site (some sources require this link)
     title_match: str = "strong"      # strong | partial
     already_added_job_id: int | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _clean(cls, v: str) -> str:
+        return clean_title(v)
 
 
 class SourceStatus(BaseModel):
@@ -473,9 +489,26 @@ def src_jsearch(request: Requester, query: str, country: Country, days: int) -> 
                             company=str(j.get("employer_name") or "").strip(),
                             location=loc + (" (Remote)" if remote and "remote" not in loc.lower() else ""),
                             posted=_day(j.get("job_posted_at_datetime_utc") or j.get("job_posted_at_timestamp")),
-                            url=str(j.get("job_apply_link") or ""), description=_text(j.get("job_description")),
+                            url=_jsearch_link(j), description=_text(j.get("job_description")),
                             remote=remote))
     return out
+
+
+# job boards whose "preview" pages refuse a normal browser (403): used only when nothing else is listed
+_DEAD_LINKS = re.compile(r"jobrapido\.com/jobpreview/", re.IGNORECASE)
+
+
+def _jsearch_link(j: dict) -> str:
+    """The link to open for a JSearch job: the employer's own apply page when JSearch lists one, then any link
+    that opens in a browser, then the job on Google; a board preview page that refuses browsers last."""
+    options = [o for o in (j.get("apply_options") or []) if isinstance(o, dict) and o.get("apply_link")]
+    links = ([str(j["job_apply_link"])] if j.get("job_apply_link") and j.get("job_apply_is_direct") else []) \
+        + [str(o["apply_link"]) for o in options if o.get("is_direct")] \
+        + ([str(j["job_apply_link"])] if j.get("job_apply_link") else []) \
+        + [str(o["apply_link"]) for o in options]
+    good = [u for u in links if not _DEAD_LINKS.search(u)]
+    google = [str(j["job_google_link"])] if j.get("job_google_link") else []
+    return (good or google or links or [""])[0]
 
 
 def src_jooble(request: Requester, query: str, country: Country) -> list[FoundJob]:

@@ -17,6 +17,7 @@ The result is stored as JSON and rendered as a printable page.
 """
 
 import json
+import os
 import re
 
 from pydantic import BaseModel, Field, ValidationError
@@ -516,6 +517,75 @@ def compose_summary(llm: LLMClient, profile: Profile, job: JobOut, selection=Non
                            notes, support, checks)
 
 
+# The resume uses your own lines exactly as written (no AI wording): bullets as your experience bank states them,
+# and a summary made of your opening sentence plus whole bank lines for the posting's main asks.
+EXACT_LINES = os.environ.get("JOB_AGENT_EXACT_LINES", "on").lower() not in ("0", "off", "false", "no")
+EXACT_SUMMARY_CHARS = (600, 820)      # about 5-6 printed lines
+
+
+def _first_sentence(text: str) -> str:
+    return re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip(), maxsplit=1)[0]
+
+
+def exact_summary(profile: Profile, job: JobOut, plan, roles) -> tuple[str, list[str]]:
+    """The summary from your own words only: the first sentence of your profile summary, then, for the posting's
+    main asks in order, one whole line from your experience bank each (its first sentence, never cut short),
+    newest job first, until it fills about six lines. A line not printed under its job is preferred; a line
+    that is used here is taken out of Experience, so nothing on the page is said twice.
+    Returns (summary, ids of the bank lines used)."""
+    recs = {r.id: r for r in profile.experience_bank}
+    printed = {b.source_id for r in roles for b in r.bullets if b.source_id}
+    starts = {e.company: e.start_date or "" for e in profile.experience}
+    opening = _first_sentence(profile.summary or "")
+    picks: list[str] = []
+    low, high = EXACT_SUMMARY_CHARS
+    text = opening
+    asks = [e for e in evidence_priorities(profile, job, plan) if e["match"] != "missing" and e["records"]]
+    for e in sorted(asks, key=lambda e: not e["main"]):
+        cands = [i for i in e["records"] if i in recs and recs[i].owner_kind == "experience" and i not in picks
+                 and not bank.is_placeholder(recs[i].text)]
+        if not cands:
+            continue
+        ask_words = {w[:6] for w in re.findall(r"[a-z]{4,}", e["ask"].lower())} - {"with", "from", "that", "your"}
+
+        # what the ask is about: the thing it asks you to build or do ("Design and own automation framework for
+        # functional ..." -> "automation framework"), worth twice the other words
+        head = re.sub(r"^(?:(?:design|build|own|develop|create|lead|drive|deliver|implement|maintain|and|the|an?|"
+                      r"hands-on|proven|strong|experience|with|in)\s+)+", "", e["ask"].lower())
+        head = re.split(r"\s+(?:for|to|with|in|of|across|and|that|from)\s+|[,;:(—–]", head, maxsplit=1)[0]
+        head_words = {w[:6] for w in re.findall(r"[a-z]{4,}", head)}
+
+        def says(i: str) -> tuple[int, int]:   # the asked object first ("automation framework"), then the rest
+            words = {w[:6] for w in re.findall(r"[a-z]{4,}", recs[i].text.lower())}
+            return len(head_words & words), len(ask_words & words)
+        cands.sort(key=lambda i: (-says(i)[0], -says(i)[1], i in printed,
+                                  "".join(chr(255 - ord(c)) for c in starts.get(recs[i].owner, ""))))
+        line = _first_sentence(recs[cands[0]].text)
+        if not line.endswith((".", "!", "?")):
+            line += "."
+        if len(text) + 1 + len(line) > high:
+            continue
+        picks.append(cands[0])
+        text = f"{text} {line}".strip()
+        if len(text) >= low:
+            break
+    # few asks your bank answers: go on with your strongest lines for this job (not yet on the page first)
+    if len(text) < low:
+        ranked = sorted((i for i in plan.scores if i in recs and recs[i].owner_kind == "experience"
+                         and i not in picks and not bank.is_placeholder(recs[i].text)),
+                        key=lambda i: (i in printed, -plan.scores[i]))
+        for i in ranked:
+            line = _first_sentence(recs[i].text)
+            line = line if line.endswith((".", "!", "?")) else line + "."
+            if len(text) + 1 + len(line) > high:
+                continue
+            picks.append(i)
+            text = f"{text} {line}"
+            if len(text) >= low:
+                break
+    return text, picks
+
+
 def evidence_priorities(profile: Profile, job: JobOut, plan) -> list[dict]:
     """The ONE evidence selection both documents use: the posting's main asks in order, each with its strongest
     records and the match (direct / transferable / missing). The resume summary is written from it, and the
@@ -649,7 +719,7 @@ def _plan_summary_items(profile: Profile, plan) -> tuple[list, set[str]]:
     def background_line(r) -> bool:
         # "5+ years of ...", "programming in Python or TypeScript": background, not a responsibility to show
         langs = {"java", "python", "typescript", "javascript", "go", "sql", "ruby", "c#", "kotlin", "scala"}
-        return bool(re.match(r"\s*\d+\+?\s*years", r.requirement, re.IGNORECASE)) or bool(
+        return bool(re.match(r"\s*\d+(?:\s*[-–]\s*\d+)?\+?\s*years", r.requirement, re.IGNORECASE)) or bool(
             r.found_parts and set(r.found_parts) <= langs)
     # what this kind of role is hired for (QA Automation: reusable UI/API automation and CI; SDET: frameworks,
     # services, async, performance; lead: strategy, triage, release readiness; manager: coaching, allocation,
@@ -660,8 +730,22 @@ def _plan_summary_items(profile: Profile, plan) -> tuple[list, set[str]]:
         return sum(1 for rx in emphasis if re.search(rf"\b(?:{rx})", r.requirement, re.IGNORECASE))
     # the posting's main asks first: duties and required work before nice-to-haves; within each, what this kind
     # of role is hired for, then the posting's own order
-    rows.sort(key=lambda r: (background_line(r), -weight[r.kind], -min(stressed(r), 2), -shown[r.strength],
-                             order[id(r)]))
+    # a heading ("Our Core Technologies Include:") is not an ask
+    rows = [r for r in rows if not r.requirement.strip().endswith(":")]
+
+    def bare_tools(r) -> bool:
+        # "Selenium WebDriver", "Playwright", or the posting's tech-stack list: what you work WITH, not what the
+        # job is for. When the posting states its work in sentences ("Design and own the automation framework"),
+        # those lead; a bare tool name never decides what the summary and the letter's examples are about.
+        text = r.requirement.strip().rstrip(".")
+        items = [x.strip() for x in text.split(",")]
+        if len(items) >= 4 and sum(len(x.split()) for x in items) / len(items) <= 2.5:
+            return True                       # "Java, Python, Kubernetes, Selenium WebDriver, ..."
+        return len(text.split()) <= 3
+    sentences = [r for r in rows if not bare_tools(r) and not background_line(r)]
+    late = (lambda r: bare_tools(r)) if len(sentences) >= 2 else (lambda r: False)
+    rows.sort(key=lambda r: (background_line(r), late(r), -weight[r.kind], -min(stressed(r), 2),
+                             -shown[r.strength], order[id(r)]))
     lead_owner = next((e.company for e in profile.experience if re.search(r"\blead\b", e.title.lower())), None)
     if plan.family in ("lead", "data_lead", "manager") and lead_owner:   # your test-lead role first for lead jobs
         rows.sort(key=lambda r: not any(recs[i].owner == lead_owner for i in r.selected_ids if i in recs))
@@ -1415,6 +1499,8 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
                                  for i, (name, chosen) in enumerate(items) if not name.startswith(RESERVE))
     summary_answers: dict[str, str] = {}
     returned = 0
+    if EXACT_LINES:
+        lines, items = [], []             # nothing for the AI to write: your own lines are used as they are
     if lines or items:
         answer = _ask(llm, RESUME_SYSTEM, _job_block(job) + "\n\nBULLETS:\n" + ("\n".join(lines) or "(none)")
                       + "\n\nSUMMARY ITEMS:\n" + (summary_lines or "(none)"), _ResumeAnswer)
@@ -1442,7 +1528,7 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
                 original = first
             reason = None if new == original else check_rewording(original, new, job)
             use_new = new != original and reason is None
-            if plain_wording(new if use_new else original) != (new if use_new else original):
+            if not EXACT_LINES and plain_wording(new if use_new else original) != (new if use_new else original):
                 # an internal job name ("Registered X execution in Jenkins") told as engineering work anyone reads,
                 # whether or not the AI reworded the bullet
                 new, use_new, reason = plain_wording(new if use_new else original), True, None
@@ -1458,8 +1544,14 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
     facts = build_facts(profile)
     support: list[str] = []
     summary_checks: list[dict] = []       # per sentence: unsupported claims vs style problems, and the decision
-    summary, summary_notes = compose_summary(llm, profile, job, selection, support, answers=summary_answers,
-                                             plan=plan, checks=summary_checks)
+    if EXACT_LINES and plan is not None:
+        summary, moved = exact_summary(profile, job, plan, roles)
+        for role in roles:                 # a line in the summary is not printed again under its job
+            role.bullets = [x for x in role.bullets if x.source_id not in moved]
+        summary_notes = [f"Summary from your own lines ({', '.join(moved)}): no AI wording."] if moved else []
+    else:
+        summary, summary_notes = compose_summary(llm, profile, job, selection, support, answers=summary_answers,
+                                                 plan=plan, checks=summary_checks)
     # A summary sentence condenses 1-2 of your bullets, so check it against those bullets together.
     # Every line you wrote yourself counts as evidence: your bullets, projects and verified experience records.
     own_lines = ([h for e in profile.experience for h in e.highlights] + [h for p in profile.projects for h in p.highlights]
@@ -1474,18 +1566,21 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
     # Check sentence by sentence: a sentence that fails is left out; the rest of the AI's summary is kept.
     sentences = [x for x in re.split(r"(?<=[.!?])\s+", summary.strip()) if x]
     kept, dropped = [], []
-    for i, sentence in enumerate(sentences):
+    exact = EXACT_LINES and plan is not None
+    for i, sentence in enumerate([] if exact else sentences):
         found = problems(sentence)
         (dropped if found and i > 0 else kept).append(sentence if not found or i == 0 else (sentence, found))
-    summary = " ".join(kept)
-    summary_check = problems(summary) if summary else ["empty"]
+    summary = " ".join(sentences if exact else kept)
+    summary_check = [] if exact and summary else problems(summary) if summary else ["empty"]
     for sentence, found in dropped:
         summary_checks.append({"item": "final check", "sentence": sentence, "decision": "left out",
                                "unsupported": [{"kind": "final_check", "detail": w} for w in found], "style": []})
     if dropped:
         summary_notes.append(f"{len(dropped)} AI summary sentence(s) left out because they weren't backed by your "
                              "profile: " + " | ".join(s for s, _ in dropped))
-    source = "composed"
+    source = "bank_exact" if exact else "composed"
+    if exact:
+        kept = sentences                  # your own lines: nothing to check against themselves
     ai_summary, summary_problems = summary, summary_check + [w for _, f in dropped for w in f]
     if summary_check or len(kept) < 2:
         summary, source = reorder_summary(profile.summary or "", job), "profile_reordered"

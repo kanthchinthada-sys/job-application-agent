@@ -411,3 +411,19 @@ def test_a_paragraph_never_opens_with_a_sentence_that_points_at_nothing():
             "This work ensured reliable data flow. I profiled datasets with pandas and SQL.")
     assert drafting.drop_dangling_sentences(body) == ("I'm applying for the role. I build data pipelines.\n\n"
                                                        "I profiled datasets with pandas and SQL.")
+
+
+def test_a_document_downloads_as_a_real_pdf_made_on_the_server(client, fake_llm, app_id, monkeypatch):
+    from app import browser
+    fake_llm.queue = [{"text": "I built a pytest suite for a payments API used by three internal teams.",
+                       "fact_ids_used": ["F4"]}, {"fixes": [], "additions": []}]
+    doc = draft(client, app_id).json()
+    monkeypatch.setattr(browser, "run", lambda fn, timeout=60: b"%PDF-1.7 fake")
+    r = client.get(f"/documents/{doc['id']}/pdf")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
+    assert r.content.startswith(b"%PDF") and "attachment" in r.headers["content-disposition"]
+
+    def no_browser(fn, timeout=60):
+        raise RuntimeError("no chromium")
+    monkeypatch.setattr(browser, "run", no_browser)
+    assert client.get(f"/documents/{doc['id']}/pdf").status_code == 503

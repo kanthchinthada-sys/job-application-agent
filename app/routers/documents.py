@@ -139,6 +139,38 @@ def print_resume(document_id: Id, conn: Conn):
     return resume_render.render(resume, app.job_title, app.company)
 
 
+@router.get("/documents/{document_id}/pdf", responses={404: {"description": "Not found"},
+                                                       503: {"description": "No browser to make the PDF"}})
+def pdf(document_id: Id, conn: Conn, inline: bool = False):
+    """The document as a real PDF file, made here (Chromium prints the same page as Print / Save as PDF), so
+    it works in any browser, including ones that cannot open a print dialog. ?inline=1 shows it instead."""
+    from fastapi.responses import Response
+    import re as _re
+    from app import browser as chromium
+    from fastapi import HTTPException
+    doc = repository.get_document(conn, document_id)
+    app = repository.get_application(conn, doc.application_id)
+    page = print_resume(document_id, conn)
+    html = page.body.decode() if hasattr(page, "body") else str(page)
+
+    def make(b):
+        pg = chromium.print_page(b, html)
+        try:
+            pg.evaluate("() => window.smartJustify && window.smartJustify()")
+            return pg.pdf(format="Letter", prefer_css_page_size=True, print_background=True)
+        finally:
+            pg.close()
+    try:
+        data = chromium.run(make, timeout=60)
+    except Exception as exc:
+        raise HTTPException(503, "Could not make the PDF here (no browser available). Use Print / Save as PDF "
+                                 f"instead. ({type(exc).__name__})") from exc
+    name = _re.sub(r"[^A-Za-z0-9]+", "-", f"{_KIND_NAME.get(doc.kind, 'document')}-{app.company}-v{doc.version}")
+    how = "inline" if inline else "attachment"
+    return Response(data, media_type="application/pdf",
+                    headers={"Content-Disposition": f'{how}; filename="{name.strip("-").lower()}.pdf"'})
+
+
 class HandoffItem(BaseModel):
     label: str
     value: str
