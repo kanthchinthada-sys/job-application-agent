@@ -1,6 +1,7 @@
 """The shared workflow for every application: one evidence selection for both documents, role-type emphasis,
 two letter examples, and the final check before handing back (fictional data)."""
 from app import drafting, final_check, scorecard, selection, tailoring
+from app.bank import bank_profile
 from app.schemas import JobOut
 from tests.test_bank import FDE_JOB, LEAD_JOB, SDET_JOB, job, with_bank
 
@@ -39,6 +40,76 @@ def test_a_gap_in_the_screen_is_kept_as_missing_never_claimed():
     plan = selection.plan(p, posting)
     chosen = tailoring.evidence_priorities(p, posting, plan)
     assert any(e["match"] == "missing" and "Rust" in e["ask"] for e in chosen)
+
+
+def test_default_resume_writes_a_short_summary_from_the_selected_records(monkeypatch, client, fake_llm):
+    import json
+
+    monkeypatch.setattr(tailoring, "EXACT_LINES", True)
+    monkeypatch.setattr(tailoring, "EXACT_SUMMARY", False)
+    p = with_bank()
+    client.put("/profile", json=p.model_dump(mode="json")).raise_for_status()
+    data = SDET_JOB.model_dump(mode="json", exclude={"id", "created_at", "skills_source"})
+    created = client.post("/jobs", json=data).raise_for_status().json()
+    applied = client.post("/applications", json={"job_id": created["id"]}).raise_for_status().json()
+    fake_llm.answer = {"sentences": [
+        {"id": "T1", "text": "Uses REST Assured and JUnit 5 for reusable Java API tests across microservices "
+                             "to improve uptime."},
+        {"id": "T2", "text": "Owned Kubernetes upgrades across the entire company."},
+    ]}
+    response = client.post(f"/applications/{applied['id']}/drafts", json={"kind": "resume"})
+    doc = response.raise_for_status().json()
+    resume = json.loads(doc["content"])
+    assert len(fake_llm.calls) == 1 and "EVIDENCE:" in fake_llm.calls[0]["user"]
+    assert resume["summary_source"] == "composed"
+    assert "Uses REST Assured and JUnit 5 for reusable Java API tests across microservices." in resume["summary"]
+    assert "improve uptime" not in resume["summary"] and "entire company" not in resume["summary"]
+    assert any(c["unsupported"] for c in doc["review"]["summary_checks"])
+    assert all(not b["changed"] for role in resume["experience"] for b in role["bullets"])
+    assert {"Java", "REST Assured", "Kubernetes"} <= set(resume["skills"])
+    assert "Ollama" not in resume["skills"] and "FastAPI" not in resume["skills"]
+    assert all(g["name"] != "Skills" for g in resume["skill_groups"])
+
+
+def test_professional_summary_uses_reserve_evidence_to_reach_six_printed_lines(monkeypatch, fake_llm):
+    from app import linefit
+
+    profile = with_bank()
+    records = {r.id: r.text for r in profile.experience_bank}
+    items = [("Frameworks", [records["CH01"]]), ("Deployments", [records["CH04"]]),
+             (tailoring.RESERVE + "Data validation", [records["NB03"]]),
+             (tailoring.RESERVE + "Test strategy", [records["NB01"]]),
+             (tailoring.RESERVE + "Mentoring", [records["NB04"]])]
+
+    def measure(_html, candidates):
+        assert all(c["kind"] == "summary" for c in candidates)
+        return {c["key"]: (1 + i + (i >= 4), 0) for i, c in enumerate(candidates)}
+
+    monkeypatch.setattr(linefit, "browser_line_measure", measure)
+    fake_llm.answer = {"sentences": []}
+    checks = []
+    summary, _, _, _ = tailoring.professional_summary(
+        fake_llm, profile, SDET_JOB, items, set(), [profile.summary], checks)
+    assert records["NB01"] in summary and records["NB04"] not in summary
+    assert checks[-1]["decision"] == "left out after reaching six lines"
+
+
+def test_letter_keeps_the_best_example_and_never_repeats_the_application_line(fake_llm):
+    p = with_bank()
+    facts = drafting.build_facts(bank_profile(p))
+    priorities, _ = drafting.letter_examples(p, SDET_JOB, facts, selection.plan(p, SDET_JOB))
+    assert "Kubernetes" in priorities[1].requirement
+    fake_llm.answer = {
+        "text": "I'm applying for the Senior SDET role at Example (fictional). Senior SDET at Example\n\n"
+                "I’m applying for the Senior SDET role because I developed reusable Java API automation.\n\n"
+                "I'd welcome the chance to discuss the role.",
+        "fact_ids_used": priorities[0].fact_ids,
+    }
+    letter, _ = drafting.draft(fake_llm, p, SDET_JOB, "cover_letter")
+    assert letter.lower().count("applying") == 1
+    assert "Senior SDET at Example" not in letter
+    assert "At Contoso Health, I developed reusable Java API automation" in letter
+    assert "validated Kubernetes and Helm" in letter
 
 
 def test_a_sentence_saying_why_an_example_matters_needs_no_record():

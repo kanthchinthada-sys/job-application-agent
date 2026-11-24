@@ -319,11 +319,11 @@ How drafts stay honest (`app/drafting.py`):
 - Deterministic checks then flag: numbers not in your profile or the posting, job skills your profile doesn't
   evidence, unknown fact ids, sentences that look lifted from the job posting, and (cover letters) sentences whose
   details none of your facts state ("fraud detection" when your facts never mention it).
-- Cover letters are checked sentence by sentence. Each priority comes with the text of its evidence facts; one
-  repair call rewrites every flagged sentence from the facts closest to it and, for a letter under 150 words, adds
-  sentences from relevant facts it doesn't use yet. Every rewritten or added sentence is checked again; one that
-  still fails is left out (listed under "Left out of the letter", never kept with a warning). Without a usable AI
-  answer, unused facts are retold word for word. A fact is told once, and the letter ends by asking to talk.
+- Cover letters use evidence for the posting's strongest supported priorities. With a verified experience bank,
+  the letter shares the résumé's evidence plan and uses up to two examples, with one employer or personal
+  project per example. The draft connects each example to the role in plain language. The app checks each
+  sentence and can ask the model to repair flagged wording once. It checks the repaired sentences again and
+  can fall back to your original facts when a rewrite fails.
 - Screening answers get one revise pass; a revision is kept only if it is no less honest.
 - The greeting and your signature are added by the app, never by the model.
 
@@ -337,14 +337,16 @@ the draft is scanned for common AI-writing patterns (hype words, formulaic openi
 File > Print > Save as PDF. How it stays honest (`app/tailoring.py`):
 - Your most relevant real bullets are selected per role by a deterministic ranking (overlap with the job's
   skills and description); skills the job asks for are listed first.
-- The AI lightly rewords the selected bullets; each rewording is compared with its original and rejected if
-  it adds a number, a job skill, more than 3 words from the posting, AI-sounding phrasing, or 10+ words.
-- The summary is 2-3 concise sentences, and its length follows your evidence (there is no word target): your own
-  opening sentence (framed for the job only if it stays true), one sentence combining the job's top two
-  requirements from your strongest records for them, then a line on working with clients for client-facing roles
-  or one measured result. A large profile gives the strongest role-relevant evidence; a small one gives a shorter,
-  accurate summary. A sentence that fails its claim checks is written without AI from your records, or left out
-  and replaced by the next requirement.
+- The selected bullets keep your wording by default. Setting `JOB_AGENT_EXACT_LINES=off` enables
+  AI rewording with checks against each original bullet.
+- The summary starts with your professional identity and adds grounded, role-relevant sentences to fill at
+  least six printed lines when there is enough distinct evidence. Each sentence is checked against its source
+  records, and the app measures the result in Chromium when it is available. Your own evidence
+  fills in if the model is unavailable or its wording fails review. With a verified experience bank,
+  `JOB_AGENT_EXACT_SUMMARY=on` uses your original wording for the summary too.
+- Core Skills groups evidenced tools and practices by category, ranked against the posting. It includes relevant
+  supporting skills shown in your work alongside direct matches. The review shows the requirement and any
+  verified records behind each listed skill.
 - **Requirements → your experience → where it is on the resume** (Materials): every requirement of the posting,
   whether your records meet it fully, partly or not at all (what is shown and what is missing), and for each
   record the employer and bullet number it printed at, or that it was cut to fit two pages. People-skill lines

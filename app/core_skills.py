@@ -1,11 +1,11 @@
-"""Core Skills for one job: 8-10 compact groups a recruiter scans in seconds, most relevant first.
+"""Core Skills for one job: compact groups ordered by their relevance to the posting.
 
 1. Candidates: every skill you have (your skill lists, per role and project, and tools named in your VERIFIED
    experience records). Nothing is added because the posting names it.
 2. Each skill is weighed by the posting: a skill a required qualification or a listed duty asks for counts most,
    then a preferred one; a skill your records show in actual work counts more than one that is only listed.
 3. Skills go under plain category labels ("API testing", "CI/CD", "Data validation"); each skill once. The
-   categories with the most weight for this job are kept (8-10), strongest first.
+   categories with the most weight for this job are kept, strongest first.
 4. Ways of working ("align stakeholders", "independently successful") are not skills and are never listed. A
    leadership skill ("test strategy", "mentoring") is listed only when a verified record shows that work.
 
@@ -17,7 +17,7 @@ import re
 from app import evidence as ev
 from app.bank import verified
 
-MIN_LINES, MAX_LINES = 8, 10        # compact groups, ordered by relevance to the posting
+MIN_LINES, MAX_LINES = 8, 10
 MAX_LINE_CHARS = 105            # label + skills on one printed line at full width
 MAX_PER_LINE = 7
 
@@ -70,11 +70,21 @@ _ASKS = {
 }
 # the work a leadership skill names, as a record would say it
 _LEAD_EVIDENCE = {
-    "test planning": r"test plan|planning", "test plans": r"test plan", "test strategy": r"strateg",
-    "defect triage": r"triage", "mentoring": r"mentor", "release validation": r"release",
-    "release coordination": r"release", "release readiness": r"release", "technical leadership": r"\bled\b|\blead",
+    "test planning": r"\btest planning\b|\b(?:developed|defined|created|wrote|owned)\b.{0,30}\btest plans?\b",
+    "test plans": r"\b(?:developed|defined|created|wrote|owned)\b.{0,30}\btest plans?\b",
+    "test strategy": r"\btest strateg(?:y|ies)\b",
+    "defect triage": r"\bdefect triage\b|\btriaged defects\b",
+    "mentoring": r"\bmentor(?:ed|ing)\b",
+    "release validation": r"\brelease validation\b|\bvalidated releases?\b",
+    "release coordination": r"\brelease coordination\b|\bcoordinated releases?\b",
+    "release readiness": r"\brelease readiness\b",
+    "technical leadership": r"\btechnical leadership\b|\bled (?:a |the )?(?:qa|test automation|quality engineering) team\b",
     "risk-based testing": r"risk-based",
+    "uat coordination": r"\b(?:coordinated|led)\b.{0,30}\b(?:uat|user acceptance testing)\b",
 }
+_INFERRED_PRACTICES = ("Test planning", "Test strategy", "Defect triage", "Mentoring", "Release validation",
+                       "Release coordination", "Release readiness", "Technical leadership",
+                       "Risk-based testing", "UAT coordination")
 
 
 # a dropped category whose named tools belong in a kept line without changing what that line says
@@ -136,16 +146,27 @@ def is_listable(skill: str) -> bool:
     return not (SOFT.search(skill) and category_of(skill) == _LEADERSHIP and not re.search(r"mentor|triage", skill, re.I))
 
 
+def practice_records(skill: str, records) -> list[str]:
+    """Verified records that explicitly demonstrate the leadership practice."""
+    pattern = _LEAD_EVIDENCE.get(skill.lower())
+    return [r.id for r in records if pattern and re.search(pattern, r.text, re.IGNORECASE)]
+
+
 def core_skills(profile, job, plan, candidates: list[str], debug: dict | None = None
                 ) -> tuple[list[str], list[dict], list[dict]]:
-    """(skills in order, 3-5 lines [{name, skills}], review entries). ``candidates``: your skills, as
+    """(skills in order, lines [{name, skills}], review entries). ``candidates``: your skills, as
     selection.select_skills lists them (already only skills you have)."""
-    from app.selection import _NOT_SKILL, SOFT
+    from app.selection import KNOWN_TECH, _NOT_SKILL, SOFT, requirements
     records = verified(profile)
-    chosen_ids = {i for ids in plan.selected.values() for i in ids}
+    chosen_ids = {i for ids in plan.selected.values() for i in ids} if plan is not None else set()
     vocab = ev.vocabulary(profile)
     kind_weight = {"required": 6.0, "responsibility": 5.0, "preferred": 3.0}
-    reqs = [q for q in plan.requirements if q.kind in kind_weight]
+    reqs = [q for q in (plan.requirements if plan is not None else requirements(job, profile))
+            if q.kind in kind_weight]
+    highlights = [h.lower() for e in profile.experience for h in e.highlights]
+    highlights += [h.lower() for p in profile.projects for h in p.highlights]
+    candidates = candidates + [t for t in KNOWN_TECH if any(ev._has(h, t.lower()) for h in highlights)]
+    candidates += [s for s in _INFERRED_PRACTICES if practice_records(s, records)]
 
     def shown_in(skill: str) -> list[str]:
         low = skill.lower()
@@ -158,32 +179,37 @@ def core_skills(profile, job, plan, candidates: list[str], debug: dict | None = 
         home = category_of(skill)
         ids = shown_in(skill)
         if home == _LEADERSHIP:
-            pattern = _LEAD_EVIDENCE.get(skill.lower(), re.escape(skill.lower()))
-            ids = [r.id for r in records if re.search(pattern, r.text, re.IGNORECASE)]
+            ids = practice_records(skill, records) or (ids if skill.lower() not in _LEAD_EVIDENCE else [])
             if not ids:
                 continue                  # a leadership claim needs a record of that work
         weight, why = 0.0, None
         for q in reqs:
+            exact = ev._has(q.text.lower(), skill.lower())
             m = ev.match_requirement(profile, q.text, [("s", skill)], vocab)
             # a part about people or customers ("customer-facing") never makes a tool asked for ("client-go");
             # a related match (REST Assured for "API testing") counts a little less than the posting naming it
-            hits = [e for e in m.evidence if not (_NOT_SKILL.search(e.part) or SOFT.search(e.part))]
+            hits = [e for e in m.evidence if not (_NOT_SKILL.search(e.part) or SOFT.search(e.part))
+                    and (not e.related or re.search(_ASKS[home], q.text, re.IGNORECASE))]
             # (only a line about testing: "building web applications" doesn't ask for Playwright)
             does = bool(re.search(r"\btest|automat|validat|\bqa\b", q.text, re.IGNORECASE)) and any(
                 re.search(rx, q.text, re.IGNORECASE) and any(t in skill.lower() for t in tools) for rx, tools in _DOES)
-            if not hits and not does:
+            if not exact and not hits and not does:
                 continue
-            value = kind_weight[q.kind] * (1.0 if any(not e.related for e in hits) else 0.85)
+            value = kind_weight[q.kind] * (1.25 if exact else 1.0 if any(not e.related for e in hits) else 0.75)
             if value > weight:
                 weight, why = value, f"{q.kind}: {q.text[:90]}"
+        demonstrated = bool(ids) or any(ev._has(h, skill.lower()) for h in highlights)
         if ids:
             weight += 1.5 if set(ids) & chosen_ids else 0.8     # shown in work (on this resume: more)
             weight += min(1.0, 0.15 * len(ids))                # central to your work: in many records
+        elif demonstrated:
+            weight += 0.8
         else:
             weight += 0.2                                      # listed in your skills only
         if home not in ("Languages",) and not _named_tool(skill):
             weight -= 0.5                                      # recruiters scan for tools; practices after them
-        scored[skill] = {"skill": skill, "category": home, "weight": weight, "why": why, "records": ids[:3]}
+        scored[skill] = {"skill": skill, "category": home, "weight": weight, "why": why,
+                         "records": ids[:3], "demonstrated": demonstrated}
 
     if debug is not None:
         debug.update(scored)
@@ -213,7 +239,7 @@ def core_skills(profile, job, plan, candidates: list[str], debug: dict | None = 
         return (0.5 * sum(s["weight"] for s in items[:4]) + 0.6 * min(40.0, ask.get(label, 0.0))
                 + (6.0 if label == lead_line and ask.get(label, 0.0) >= 3 else 0.0))
     ranked = sorted(by_cat.items(), key=lambda kv: -cat_weight(*kv))
-    asked = [kv for kv in ranked if any(s["why"] for s in kv[1]) or ask.get(kv[0], 0) >= 3]
+    asked = [kv for kv in ranked if any(s["why"] for s in kv[1])]
     # more kinds of work asked for than lines: related lines share one ("CI/CD and containers") before any
     # asked-for line is dropped
     for source in ("Cloud and messaging", "Kubernetes and deployment", "API testing", "Data validation"):
@@ -225,17 +251,20 @@ def core_skills(profile, job, plan, candidates: list[str], debug: dict | None = 
     langs = next((kv for kv in asked if kv[0] == "Languages" and any(s["why"] for s in kv[1])), None)
     if langs and langs not in keep:
         keep = keep[:MAX_LINES - 1] + [langs]
-    for kv in ranked:                     # at least 3 lines: then the categories your work shows most
+    for group in ranked:
         if len(keep) >= MIN_LINES:
             break
-        if kv not in keep:
-            keep.append(kv)
+        label, skills = group
+        if group not in keep and ask.get(label, 0) and any(s["demonstrated"] for s in skills):
+            keep.append(group)
+    if not keep:
+        keep = ranked[:MIN_LINES]
     keep.sort(key=lambda kv: -cat_weight(*kv))
     if langs in keep:                     # languages last: the work-type lines are what a recruiter scans first
         keep.remove(langs)
         keep.append(langs)
 
-    # a category that didn't make the 5 lines: the skills the posting asks for still show, in the closest line
+    # A category outside the limit can still show directly requested tools in the closest line.
     # kept ("REST Assured" with test automation, "SQL" with languages), when it has room
     folded: dict[str, list[dict]] = {}
     kept = [label for label, _ in keep]
@@ -248,11 +277,10 @@ def core_skills(profile, job, plan, candidates: list[str], debug: dict | None = 
                                                and x["records"] and _FOLDS[label](x["skill"]))
 
     groups, review = [], []
-    # the lines chosen, then (only while fewer than 3 lines have 2+ skills) the next categories your work shows
-    order = keep + [kv for kv in ranked if kv not in keep]
-    for n, (label, items) in enumerate(order):
-        if n >= len(keep) and len(groups) >= MIN_LINES:
-            break
+    for label, items in keep:
+        supported = [s for s in items if s["why"] or s["demonstrated"]]
+        if supported:
+            items = supported
         line, used = [], len(label) + 2
         # named tools first, then at most one practice ("API testing", "ETL validation") at the end
         # (test leadership is all practices: up to four of them)
@@ -268,13 +296,14 @@ def core_skills(profile, job, plan, candidates: list[str], debug: dict | None = 
                 continue                  # "Selenium" and "Selenium WebDriver": once
             if len(line) >= 6 and not s["why"]:
                 continue                  # a long line only for what the posting asks
-            if not s["why"] and s["weight"] < 1.0 and len(line) >= 3:
+            if not s["why"] and not s["demonstrated"] and len(line) >= 3:
                 continue                  # only listed, nothing asks for it: room is better left
             line.append(display(s["skill"]))
             used += len(s["skill"]) + 2
-            review.append({"line": label, "skill": display(s["skill"]), "why": s["why"] or "shown in your work",
+            evidence = "shown in your work" if s["demonstrated"] else "listed on your profile"
+            review.append({"line": label, "skill": display(s["skill"]), "why": s["why"] or evidence,
                            "records": s["records"]})
-        if len(line) >= 2 or (line and label == "Languages"):
+        if line:
             homes = {category_of(x) for x in line}
             name = label
             if label == "Test automation" and "API testing" in homes:
@@ -284,6 +313,4 @@ def core_skills(profile, job, plan, candidates: list[str], debug: dict | None = 
                     ["cloud"] if "Cloud and messaging" in homes else [])
                 name = "CI/CD and " + " and ".join(parts) if len(parts) == 1 else "CI/CD, containers and cloud"
             groups.append({"name": name, "skills": line})
-        else:
-            review = [r for r in review if r["line"] != label]
     return [s for g in groups for s in g["skills"]], groups, review

@@ -13,10 +13,12 @@ JOB_AGENT_ACCOUNTS=off in .env goes back to one shared workspace (optionally pro
 
 import os
 
-from app.api import create_app
 from app.config import LOG_DIR, get_password, load_env_file
 
 load_env_file()
+
+from app.api import create_app  # noqa: E402
+
 _accounts = os.environ.get("JOB_AGENT_ACCOUNTS", "on").strip().lower() not in ("off", "0", "false", "no")
 app = create_app(password=None if _accounts else get_password(), log_dir=LOG_DIR,
                  log_level=os.environ.get("LOG_LEVEL", "INFO"), accounts=_accounts)

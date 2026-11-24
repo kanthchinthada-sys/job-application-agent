@@ -136,6 +136,7 @@ def prompts() -> dict[str, str]:
         "drafting": drafting.SYSTEM_PROMPT,
         "resume_reword": tailoring.RESUME_SYSTEM,
         "resume_summary": tailoring.RESUME_SYSTEM,
+        "professional_summary": tailoring.PROFESSIONAL_SUMMARY_SYSTEM,
         "ai_match": ai_match.SYSTEM,
         "job_intake": job_intake.AI_SYSTEM,
         "task_cover_letter": drafting._task("cover_letter", ""),

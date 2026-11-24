@@ -41,16 +41,19 @@ _MEASURE_JS = r"""
     for (const k of keys.slice(0, -1)) { const L = map.get(k); if (L.words > 1) worst = Math.max(worst, (right - L.right) / (L.words - 1)); }
     return [keys.length, worst];
   }
-  const out = {};
+  const elements = new Map();
   for (const it of items) {
     let el;
     if (it.kind === 'skill') { el = document.createElement('p'); el.className = 'skill';
       const b = document.createElement('b'); b.textContent = it.label + ':'; el.appendChild(b);
       el.appendChild(document.createTextNode(' ' + it.text)); box.appendChild(el); }
+    else if (it.kind === 'summary') { el = document.createElement('p'); el.textContent = it.text; box.appendChild(el); }
     else { const ul = document.createElement('ul'); el = document.createElement('li'); el.textContent = it.text;
       ul.appendChild(el); box.appendChild(ul); }
-    out[it.key] = lines(el);
+    elements.set(it.key, el);
   }
+  if (items.some(it => it.kind === 'summary')) window.smartJustify?.();
+  const out = Object.fromEntries([...elements].map(([key, el]) => [key, lines(el)]));
   box.remove();
   return out;
 }
@@ -172,7 +175,7 @@ def _context_for(owner: str, profile, extra_skills: list[str]) -> str:
     return " ".join(texts + [", ".join(extra_skills)])
 
 
-def polish(llm, resume, profile, job, render_html, measure=browser_line_measure) -> dict:
+def polish(llm, resume, profile, job, render_html, measure=browser_line_measure, *, fill_skills: bool = True) -> dict:
     """Find gappy lines in the resume and fix them in place. Returns the report for review["line_fit"]."""
     report = {"method": METHOD, "measured": False, "gap_limit_px": GAP_LIMIT, "changes": [], "left_as_is": []}
     html = render_html(resume)
@@ -201,8 +204,8 @@ def polish(llm, resume, profile, job, render_html, measure=browser_line_measure)
     for key, kind, label, text, where, owner, oskills in bad:
         if kind == "skill":
             skills = resume.skill_groups[where]["skills"]
-            candidates[key] = [(", ".join(s), note)
-                               for s, note in _skill_candidates(skills, _extras_for(label, shown, profile, [g["name"] for g in resume.skill_groups]))]
+            extras = _extras_for(label, shown, profile, [g["name"] for g in resume.skill_groups]) if fill_skills else []
+            candidates[key] = [(", ".join(s), note) for s, note in _skill_candidates(skills, extras)]
 
     bullets = [t for t in bad if t[1] == "li"][:MAX_BULLETS]
     contexts = {t[0]: _context_for(t[5], profile, t[6] or []) for t in bullets}

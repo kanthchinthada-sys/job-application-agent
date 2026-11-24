@@ -79,6 +79,7 @@ def test_the_resume_uses_your_lines_exactly_and_never_repeats_a_summary_line(mon
     import json
     from app import tailoring
     monkeypatch.setenv("JOB_AGENT_PAGE_MEASURE", "off")
+    monkeypatch.setattr(tailoring, "EXACT_SUMMARY", True)
 
     class NoAI:
         def __getattr__(self, name):

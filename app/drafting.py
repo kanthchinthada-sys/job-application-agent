@@ -187,9 +187,8 @@ def letter_examples(profile: Profile, job: JobOut, facts: list[Fact], plan) -> t
     fid = lambda rid: by_text.get(records.get(rid, ""))
     chosen = [e for e in evidence_priorities(profile, job, plan) if e["main"] and e["records"]
               and not _NOT_FOR_LETTER.search(e["ask"])]
-    priorities = [Priority(requirement=e["ask"], fact_ids=[f for f in map(fid, e["records"]) if f])
-                  for e in chosen[:LETTER_EXAMPLES]]
-    priorities = [p for p in priorities if p.fact_ids]
+    priorities = [Priority(requirement=e["ask"], fact_ids=ids) for e in chosen
+                  if (ids := [f for f in map(fid, e["records"]) if f])][:LETTER_EXAMPLES]
     if not priorities:
         return plan_letter_from_plan(profile, job, facts, plan)
     context = [f for e in chosen[LETTER_EXAMPLES:LETTER_EXAMPLES + 2] for f in map(fid, e["records"][:1]) if f]
@@ -235,26 +234,20 @@ def plan_letter_from_plan(profile: Profile, job: JobOut, facts: list[Fact], plan
 def _task(kind: Kind, question: str) -> str:
     if kind == "cover_letter":
         return (
-            "Write the BODY of a cover letter for this job, 230-300 words, in short paragraphs, as the candidate "
-            "would write it: natural first person, specific, plain. It gives the reader what the resume alone "
-            "doesn't: why these examples matter for THIS role.\n"
-            "1. Opening (2 sentences): the exact role and company (once), then one sentence on the work you do that "
-            "fits the FIRST priority.\n"
-            "2. First example (2-3 sentences): the FIRST priority. What you did in its strongest fact, saying where "
-            "(\"At Contoso, I ...\") with the tools, scale and numbers the fact names. Then ONE sentence "
-            "starting with \"That\" or \"This\" saying why it matters for this role, in your own words about the "
-            "posting's need (no claim about yourself in that sentence, no numbers).\n"
-            "3. Second example (2-3 sentences): the SECOND priority, the same way.\n"
-            "4. Optional, 1-2 sentences: how the two connect, or how you work, from the facts only.\n"
-            "5. Closing (1-2 sentences): interest in the specific work this role does (name it), and that you'd "
-            "like to talk.\n"
-            "Use only these two examples' facts for claims (a context fact may support paragraph 4). Personal-project "
-            "work is said to be a personal project. Name each tool with the work it was used for. Never list every "
-            "fact, never restate the resume, never mention education or years of experience.\n"
-            "EVERY claim about you must come from the FACTS (keep numbers exactly). Where the candidate lacks "
-            "something the job wants, say nothing about it.\n"
-            "Do NOT write a greeting or a sign-off; they are added automatically. Do not restate the whole resume. "
-            "Where the candidate lacks something the job wants, say nothing about it."
+            "Write a concise cover letter in natural first person. Separate each paragraph with a blank line. "
+            "Aim for 160–230 words if the facts support it. Use fewer words when there is less evidence.\n"
+            "1. Opening. Name the exact job title and company. Connect your interest to a specific part of the work. "
+            "Save the details of your examples for the middle.\n"
+            "2. Tell one example for the first supported priority. Lead with its strongest fact. Explain what "
+            "you did, where and how. Add a detail or outcome only when its fact supports it, preserving any limits "
+            "on the outcome. In a final sentence beginning with 'That' or 'This', connect the example to a concrete "
+            "need in the posting without adding a new claim about the candidate.\n"
+            "3. Use a different example for the next supported priority. Each example stays with one employer "
+            "or clearly identified personal project. If there is only one supported example, use one.\n"
+            "4. Closing. End with a short invitation to discuss the specific work.\n"
+            "Write only the body. Use the facts attached to each priority for that example. Retell them as prose "
+            "and keep the names, tools and any numbers accurate. Avoid lists of tools, generic praise, unsupported "
+            "company motivations and filler. List the fact IDs used."
         )
     return (
         f"Answer this application screening question in under 120 words:\n\"{question}\"\n"
@@ -431,6 +424,7 @@ def ensure_opening(body: str, job: JobOut) -> str:
 
 
 _CLOSING = re.compile(r"\b(talk|discuss|conversation|speak|chat|hear from you|meet|learn more)\b", re.IGNORECASE)
+_APPLICATION_LINE = re.compile(r"^I(?:['’]m| am) (?:applying|writing to apply)\b", re.IGNORECASE)
 
 
 def ensure_closing(body: str, job: JobOut) -> str:
@@ -585,6 +579,7 @@ def draft(llm: LLMClient, profile: Profile, job: JobOut, kind: Kind, question: s
     questions = [q.strip() for q in answer.questions_for_candidate if q.strip()]
     used, warnings, style = evaluate(body, cited)
     first_score, rounds = style.score, 0
+    claim_checks, removed = [], []
 
     if kind == "cover_letter" and body:
         # Repair sentence by sentence (one AI call at most): rewrite each flagged sentence from the facts closest
@@ -608,7 +603,7 @@ def draft(llm: LLMClient, profile: Profile, job: JobOut, kind: Kind, question: s
         if 0 < (n := len(body.split())) < MIN_LETTER_WORDS and repair.unused_left:
             warnings.append(f"The letter is short ({n} words; aim for 200-300) although your profile has more "
                             "relevant experience. Generate it again, or add a paragraph yourself.")
-    else:
+    elif kind != "cover_letter":
         # Screening answers: revise once for honesty problems first, then style; keep it only if no less honest.
         for _ in range(MAX_REVISIONS):
             actionable = [w for w in warnings if not w.startswith("The AI did not say")]
@@ -636,6 +631,12 @@ def draft(llm: LLMClient, profile: Profile, job: JobOut, kind: Kind, question: s
             used, warnings, style = evaluate(body, cited)
     if kind != "cover_letter":
         removed = [c["sentence"] for c in claim_checks if c["now"] is None]
+    if kind == "cover_letter" and not body and priorities:
+        application = ensure_opening("", job).strip()
+        body, left_for_length = arrange_letter(ensure_closing(application, job), facts, profile, job, priorities)
+        actual_ids = [f.id for f in shown if f.text.startswith(("At ", "Project ")) and _mentioned(f, body)]
+        used, warnings, style = evaluate(body, actual_ids)
+        warnings.append("The local AI returned no usable letter text. This draft uses the evidence from your profile.")
     if not body:
         warnings.append("The AI could not answer from your profile. See the questions below.")
     text = (wrap_letter(drop_repeated_sentences(ensure_opening(body, job)), profile.full_name)
@@ -878,7 +879,8 @@ def sentence_problems(sentence: str, facts: list[Fact], profile: Profile, job: J
     doesn't back, details none of your records state, a claim its records don't back (wrong employer, audience
     or responsibility, more ownership, leadership, a result or benefit they don't report, a number without its
     unit, a tool told with the wrong work), or an AI-writing tell a hiring manager spots at once. Empty: fine."""
-    if re.match(r"^\s*I(?:'m|’m| am) applying (?:for|to)\b", sentence) and len(sentence.split()) <= 25:
+    if (_APPLICATION_LINE.match(sentence.strip()) and len(sentence.split()) <= 25
+            and not re.search(r"\b(?:because|since|I|my|I've)\b", sentence.strip()[2:])):
         return []                         # the line naming the job: it claims nothing about your work
     if is_relevance_sentence(sentence, job):
         return []                         # why an example matters for this role: no claim about you
@@ -1238,7 +1240,7 @@ def _closing_line(job: JobOut, priorities: list["Priority"]) -> str:
     the first priority names, said plainly (no claim about you)."""
     ask = re.sub(r"^(hands-on |strong |proven |solid |deep )?(experience|background|expertise|knowledge|familiarity)"
                  r"( (with|in|of|building|using))?\s+", "", priorities[0].requirement.strip(), flags=re.IGNORECASE)
-    work = re.split(r"\s*[(,;:—–]|\s+(?:and|or|to|for|including|such as)\s+", ask, maxsplit=1)[0].strip(" .")
+    work = re.split(r"\s*[(,;:—–]|\s+(?:and|or|to|for|with|including|such as)\s+", ask, maxsplit=1)[0].strip(" .")
     work = re.sub(r"^(the|a|an)\s+", "", work, flags=re.IGNORECASE)
     if not (2 <= len(work.split()) <= 6) or re.search(r"\d|\byears?\b", work):
         return f"I'd welcome the chance to talk about the {job.title} role."
@@ -1246,7 +1248,8 @@ def _closing_line(job: JobOut, priorities: list["Priority"]) -> str:
     tools = {t.lower() for t in KNOWN_TECH}
     if work.lower() in tools or all(w.lower() in tools for w in re.split(r"\s*/\s*|\s+", work)):
         return f"I'd welcome the chance to talk about how my {work} experience could help {job.company.rstrip('.')}."
-    work = work[0].lower() + work[1:] if not re.match(r"[A-Z]{2}|[A-Z][a-z]+ [A-Z]", work) else work
+    if not ats.is_named_tool(work.split()[0]) and not re.match(r"[A-Z]{2}", work):
+        work = work[0].lower() + work[1:]
     return f"I'd welcome the chance to talk about how I can help with {work}."
 
 
@@ -1259,7 +1262,11 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
     3. the closing, naming the specific work.
     Sentences that answer neither example are left out (and listed in the review)."""
     from app.claims import employer_forms
+    from app.bank import verified
+    from app.final_check import _unfinished
+    from app.vocabulary import find_terms
     forms = employer_forms(profile)
+    grounded_examples = bool(verified(profile))
     by_id = {f.id: f for f in facts}
     trimmed: list[str] = []
     from app.job_search import clean_title
@@ -1268,11 +1275,14 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
                  and job.company.lower() not in x.lower()][:1]
     # the opening's second sentence says what you do that fits; an example that names an employer ("At X, I ...")
     # belongs to the example paragraphs (two examples, not three)
-    rest_open = [x for x in rest_open if 3 <= len(x.split()) <= 32 and not re.match(r"^(At|While at|In a) ", x)
+    rest_open = [x for x in rest_open if 3 <= len(x.split()) <= 32 and not _unfinished(x)
+                 and not re.match(r"^(At|While at|In a) ", x)
                  and not any(re.search(rf"(?<!\w){re.escape(f)}(?!\w)", x) for f in forms)]
     by_priority: dict[int, list[tuple[str, str]]] = {}
     last: int | None = None
     for sentence in middle:
+        if _APPLICATION_LINE.match(sentence):
+            continue
         sentence = plain_wording(sentence)
         if is_relevance_sentence(sentence, job):
             if last is not None and len(by_priority.get(last, [])) < 3:
@@ -1281,8 +1291,8 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
                 trimmed.append(sentence)
             continue
         owner = _owner(sentence, facts, profile)
-        ids = {f.id for f in support_facts(sentence, facts, profile, k=2)}
-        idx = next((i for i, p in enumerate(priorities) if ids & set(p.fact_ids)), None)
+        ids = {f.id for f in support_facts(sentence, facts, profile, k=1 if grounded_examples else 2)}
+        idx = next((i for i, p in enumerate(priorities) if ids.intersection(p.fact_ids)), None)
         if idx is None or len([x for x in by_priority.get(idx, []) if x[1] != ""]) >= 2:
             trimmed.append(sentence)               # answers neither example (or a third retelling of one)
             last = None
@@ -1303,13 +1313,17 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
 
     used: set[str] = set()
     owner_of: dict[int, str] = {}
-    told_text = " ".join(rest_open)       # the opening already says this: never an example again
+    told_text = "" if grounded_examples else " ".join(rest_open)
     for i, p in enumerate(priorities):
         ai = [x for x in by_priority.get(i, []) if x[1] and not (told_text.strip() and _same_work(x[0], told_text))]
         relevance = [x for x in by_priority.get(i, []) if not x[1]]
-        pool = list(ai)
+        pool = [] if grounded_examples else list(ai)
         for f in p.fact_ids:
             if f not in by_id or _mentioned(by_id[f], " ".join(x for x, _ in pool) + " " + told_text):
+                continue
+            rewritten = next((x for x in ai if _mentioned(by_id[f], x[0])), None)
+            if rewritten:
+                pool.append(rewritten)
                 continue
             told = _fact_sentence(by_id[f])
             if told:
@@ -1320,18 +1334,24 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
         evidence = {"project" if by_id[f].text.startswith("Project ") else next(iter(owners_of([by_id[f].text],
                                                                                               profile)), "")
                     for f in p.fact_ids if f in by_id}
-        owners = sorted({o for _, o in pool if o and o in evidence},
-                        key=lambda o: (o == "project", o in used, recency(o)))
+        owners = list(dict.fromkeys(o for _, o in pool if o and o in evidence))
+        if len(owners) > 1 and owners[0] in used:
+            owners.sort(key=lambda o: o in used)
         if not owners:
-            by_priority[i] = relevance
+            by_priority[i] = []
             continue
         pick = owners[0]
         used.add(pick)
         owner_of[i] = pick
         claims_ = [x for x in pool if x[1] == pick][:2]
         trimmed += [x for x, o in ai if (x, o) not in claims_]
-        told_text += " " + " ".join(x for x, _ in claims_)
-        by_priority[i] = claims_ + relevance
+        example_text = " ".join(x for x, _ in claims_)
+        if grounded_examples:
+            relevance = [(s, o) for s, o in relevance if all(
+                not ats.is_named_tool(term) or ats.supports_skill(example_text, term)
+                for _, _, term in find_terms(s))]
+        told_text += " " + example_text
+        by_priority[i] = claims_ + (relevance[:1] if any(x in ai for x in claims_) else [])
     order = sorted(range(len(priorities)), key=lambda i: (i not in owner_of, recency(owner_of.get(i, "project")), i))
 
     def short_name(owner: str) -> str:
@@ -1341,8 +1361,9 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
     def names(sentence: str, owner: str) -> bool:
         return any(re.search(rf"(?<!\w){re.escape(f)}(?!\w)", sentence) for f, name in forms.items() if name == owner)
 
+    if grounded_examples:
+        rest_open = [s for s in rest_open if not _same_work(s, told_text)]
     out = [" ".join([applying] + rest_open)]
-    project_said = False
     project_sentences: list[str] = []
     last_owner = None             # a second example from the same job goes on from the first: "I also ..."
     for i in order:
@@ -1354,10 +1375,13 @@ def _arrange_by_priority(opening: list[str], middle: list[str], closing: list[st
         if not para:
             continue
         text, prev = [], last_owner
+        project_said = False
         for sentence, owner in para:
             if owner and owner != short_name(owner):
                 sentence = sentence.replace(f"At {owner},", f"At {short_name(owner)},")
             if owner == "project":
+                sentence = re.sub(r"^(?:At|In) (?:my|a) personal project,", "In a personal project,", sentence,
+                                  flags=re.IGNORECASE)
                 if not re.search(r"\bpersonal project\b", sentence, re.I):
                     sentence = re.sub(r"^I (?:also )?", "In a personal project, I ", sentence)
                 elif project_said:
@@ -1514,7 +1538,10 @@ def _repair_letter(llm, user: str, body: str, cited: list[str], facts: list[Fact
         accepted += 1
     # still short: retell unused facts word for word in the first person (no AI, nothing added); any of your
     # evidence facts may serve here, related to the posting first
-    others = sorted((f for f in facts if f.text.startswith("At ") and f not in unused and not _PLACEHOLDER.search(f.text)),
+    from app.bank import verified
+    focused = bool(priorities and verified(profile))
+    others = sorted((f for f in facts if not focused and f.text.startswith("At ") and f not in unused
+                     and not _PLACEHOLDER.search(f.text)),
                     key=lambda f: bool(_ROUTINE.search(f.text)))
     for f in unused + others:
         # relevant evidence completes the letter to about the target length; any other record only to the minimum
@@ -1528,7 +1555,8 @@ def _repair_letter(llm, user: str, body: str, cited: list[str], facts: list[Fact
         paragraphs[target].append(sentence)
         new_cited.append(f.id)
     # still short: one line naming your skills that the posting asks for (from your Skills, nothing else)
-    if len(letter_so_far().split()) < MIN_LETTER_WORDS and (line := _skills_sentence(facts, job, letter_so_far())):
+    if not focused and len(letter_so_far().split()) < MIN_LETTER_WORDS \
+            and (line := _skills_sentence(facts, job, letter_so_far())):
         paragraphs[target].append(line)
     out = "\n\n".join(" ".join(x for x in ss if x) for ss in paragraphs)
     out = "\n\n".join(p for p in out.split("\n\n") if p.strip())

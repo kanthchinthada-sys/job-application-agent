@@ -401,8 +401,9 @@ def test_a_letter_tells_two_examples_naming_each_employer_and_keeps_projects_apa
     assert paras[0].endswith("I build API test automation in Python.")              # the opening, kept true
     # paragraphs follow the posting's priorities; every example says where it was done, at its start
     sentences = [x for p in paras[1:] for x in re.split(r"(?<=[.!?])\s+", p) if x]
+    selenium_example = next(p for p in paras[1:-1] if "Selenium and Java" in p)
     selenium = next(x for x in sentences if "Selenium and Java" in x)
-    assert selenium.startswith("At Sample Systems, I") and not selenium.endswith("at Sample Systems.")
+    assert selenium_example.startswith("At Sample Systems, I") and not selenium.endswith("at Sample Systems.")
     assert not any(re.match(r"^At Example,", x) for x in sentences)                   # the employer's full name
     assert any(x.startswith("At Example Corp, I") for x in sentences)
     assert not any("registered checkout" in x.lower() for x in sentences)              # never the internal wording

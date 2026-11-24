@@ -24,6 +24,7 @@ def test_core_skills_are_compact_groups_led_by_what_the_posting_hires_for():
     shown = [s for g in lines for s in g["skills"]]
     assert len(shown) == len({s.lower() for s in shown})                       # each skill once
     assert "align stakeholders" not in shown and "independently successful" not in shown   # not skills
+    assert "JUnit 5" in shown                                                # supporting work for the role
     assert not ("Selenium" in shown and "Selenium WebDriver" in shown)         # one name per tool
     assert all(r["records"] or r["why"] for r in review)                       # evidence in the private review
     copilot = [g["name"] for g in lines if "GitHub Copilot" in g["skills"]]
@@ -35,7 +36,7 @@ def test_a_leadership_skill_needs_a_record_of_that_work():
     _, lines, _ = _lines(p, LEAD_JOB)
     lead = next((g["skills"] for g in lines if g["name"] == "Test leadership"), [])
     assert {"Mentoring", "Test strategy", "Defect triage"} <= set(lead), lead    # NB04, NB01, NB02 show that work
-    assert len(lines) >= 3
+    assert [g["name"] for g in lines] == ["Test leadership"]      # unsupported categories don't pad the section
     p.experience_bank = [r for r in p.experience_bank if not r.text.startswith(("Mentored", "Ran one-to-one"))]
     p.skills = [s for s in p.skills if s != "Mentoring"]
     _, lines, _ = _lines(p, LEAD_JOB)
