@@ -66,7 +66,7 @@ class E2EFakeLLM:
         if "fixes" in props:          # the cover letter's repair: rewrite the flagged sentence from a real fact
             return {"fixes": [{"id": "S1", "text": "I worked with customer support to reproduce production issues "
                                                    "using Docker containers.", "fact_ids": ["F5"]}], "additions": []}
-        if "text" in props:
+        if {"text", "examples"} & props.keys():
             if "PROBLEMS FOUND" in user:
                 return {"text": "I build pytest suites for a payments API used by three internal teams. When a run "
                                 "fails I work out whether it is the product, the test or the environment.",

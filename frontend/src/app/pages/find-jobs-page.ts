@@ -1,4 +1,4 @@
-import { Component, computed, inject, OnInit, signal } from '@angular/core';
+import { afterNextRender, Component, computed, inject, Injector, OnDestroy, OnInit, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 
@@ -11,6 +11,7 @@ import { Msg, MsgBox } from '../ui';
 @Component({
   selector: 'app-find-jobs-page',
   imports: [FormsModule, MsgBox, RouterLink],
+  host: { '(window:scroll)': 'rememberScroll()' },
   template: `
     <div class="card">
       <h2>Find jobs</h2>
@@ -45,13 +46,16 @@ import { Msg, MsgBox } from '../ui';
         @if (state.apifyRun(); as run) {
           <div data-testid="apify-progress" [class.warn-text]="isFailed(run.status)">
             @if (run.active) { <span class="spinner"></span> }
-            Apify search "{{ run.filters.title }}" ({{ run.filters.date_from }} to {{ run.filters.date_to }}):
+            @if (run.filters; as filters) {
+              Apify search "{{ filters.title }}" ({{ filters.date_from }} to {{ filters.date_to }}):
+            }
             {{ statusText(run) }}
           </div>
         }
         @if (state.apifyError()) { <div class="warn-text" data-testid="apify-error">{{ state.apifyError() }}</div> }
       </div>
       @if (msg()?.kind === 'bad') { <app-msg [msg]="msg()" /> }
+      @if (state.searchError()) { <p class="warn-text" role="alert">{{ state.searchError() }}</p> }
       @if (result(); as r) {
         <p class="small muted" data-testid="sources">
           @for (s of r.sources; track s.name) {
@@ -122,8 +126,10 @@ import { Msg, MsgBox } from '../ui';
     }
   `,
 })
-export class FindJobsPage implements OnInit {
+export class FindJobsPage implements OnInit, OnDestroy {
   private api = inject(Api);
+  private injector = inject(Injector);
+  private lastScroll: number | null = null;
   /** Filters, results and Apply progress live in a shared service, so they survive leaving this tab. */
   protected readonly state = inject(FindJobsState);
 
@@ -155,27 +161,52 @@ export class FindJobsPage implements OnInit {
     }
     return [...out.values()].sort((a, b) => (b.posted ?? '').localeCompare(a.posted ?? ''));
   });
-  protected readonly busy = signal(false);
+  protected readonly busy = this.state.searching;
   protected readonly msg = signal<Msg | null>(null);
 
   async ngOnInit() {
-    this.state.loadApify();                         // its settings and your latest run (not awaited: optional)
+    const restoring = this.state.restoreSearch();
+    const apify = restoring.then(() => this.state.loadApify(!this.title() && !this.result()));
     try {
       const c = await this.api.searchCountries();
       this.countries.set(c.countries);
     } catch (e) {
       this.msg.set({ kind: 'bad', text: (e as ApiError).message });
     }
-    if (this.result()) return;                      // coming back: keep your last search as it was
+    await restoring;
+    if (this.result() || this.busy()) {
+      this.restoreScroll();
+      return;
+    }
     if (!this.country()) this.country.set('CA');
+    if (!this.title()) await apify;
+    if (this.title() || this.state.apifyRun()?.filters || this.busy()) {
+      this.restoreScroll();
+      return;
+    }
     try {   // a first visit starts from your own target role and country, if your profile has them
-      const p = await this.api.profile() as any;
+      const p = await this.api.profile() as { preferences?: { target_roles?: string[]; locations?: string[] } };
+      if (this.title() || this.busy()) return;
       const role = p?.preferences?.target_roles?.[0];
       if (role && !this.title()) this.title.set(role);
       const locs: string[] = (p?.preferences?.locations ?? []).map((x: string) => x.toLowerCase());
       const hit = this.countries().find(c => locs.some(l => l.includes(c.name.toLowerCase())));
       if (hit) this.country.set(hit.code);
     } catch { /* no profile yet: fine */ }
+  }
+
+  ngOnDestroy() {
+    if (this.result() || this.apifyJobs().length) this.state.scroll.set(this.lastScroll ?? window.scrollY);
+  }
+
+  protected rememberScroll() {
+    this.lastScroll = window.scrollY;
+  }
+
+  private restoreScroll() {
+    const position = this.state.scroll();
+    this.lastScroll = position;
+    if (position > 0) afterNextRender(() => window.scrollTo(0, position), { injector: this.injector });
   }
 
   /** The preset that matches the chosen dates (highlighted), or null for custom dates. */
@@ -194,20 +225,9 @@ export class FindJobsPage implements OnInit {
       this.msg.set({ kind: 'bad', text: 'Enter a job title.' });
       return;
     }
-    this.busy.set(true);
-    this.result.set(null);
-    this.state.rows.set({});
-    this.msg.set({ kind: 'info', text: 'Searching the job sources…' });
-    try {
-      const r = await this.api.searchJobs({ title: this.title().trim(), country: this.country(),
-                                            date_from: this.dateFrom(), date_to: this.dateTo() });
-      this.result.set(r);
-      this.msg.set({ kind: 'ok', text: `${r.results.length} jobs found in ${r.country}, posted ${r.date_from} to ${r.date_to}.` });
-    } catch (e) {
-      this.msg.set({ kind: 'bad', text: (e as ApiError).message });
-    } finally {
-      this.busy.set(false);
-    }
+    this.msg.set(null);
+    await this.state.search({ title: this.title().trim(), country: this.country(),
+                              date_from: this.dateFrom(), date_to: this.dateTo() });
   }
 
   /** Start the paid Apify search with the same filters (an explicit choice; the free results stay usable). */

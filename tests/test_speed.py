@@ -24,7 +24,7 @@ class SlowModel:
             self.active += 1
             self.overlap = self.overlap or self.active > 1
         props = schema.get("properties", {})
-        kind = "letter" if "text" in props else "letter repair" if "fixes" in props else "resume"
+        kind = "letter" if {"text", "examples"} & props.keys() else "letter repair" if "fixes" in props else "resume"
         self.order.append(kind)
         time.sleep(0.2)
         with self._lock:

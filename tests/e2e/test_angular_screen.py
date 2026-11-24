@@ -239,6 +239,7 @@ def test_experience_bank_import_search_and_confirm(ui: Page):
 
 
 def test_find_jobs_then_apply_prepares_everything(ui: Page):
+    ui.set_viewport_size({"width": 1300, "height": 375})
     save_profile(ui)
     ui.get_by_role("link", name="Find jobs").click()
     ui.get_by_label("Job title").fill("QA Engineer")
@@ -255,7 +256,11 @@ def test_find_jobs_then_apply_prepares_everything(ui: Page):
     with ui.context.expect_page() as employer_page:                    # the employer's page opens in a new tab
         row.get_by_role("button", name="Apply").click()
     assert employer_page.value.url.startswith("https://remotive.example/jobs/2") or employer_page.value
-    row.get_by_role("link", name="Open application").click()          # leave while it's being prepared
+    open_application = row.get_by_role("link", name="Open application")
+    open_application.scroll_into_view_if_needed()
+    last_scroll = ui.evaluate("window.scrollY")
+    assert last_scroll > 0
+    open_application.click()                                        # leave while it's being prepared
     expect(ui.get_by_test_id("workspace-title")).to_contain_text("QA Engineer")
     expect(ui.get_by_test_id("status-cover_letter")).to_contain_text("Ready", timeout=30000)   # appears by itself
     expect(ui.get_by_test_id("status-resume")).to_contain_text("Ready", timeout=30000)
@@ -263,6 +268,15 @@ def test_find_jobs_then_apply_prepares_everything(ui: Page):
     row = ui.get_by_test_id("found-jobs").locator("tr", has_text="Globex (fictional)")
     expect(row).to_contain_text("Ready: resume and cover letter prepared", timeout=20000)
     expect(ui.get_by_label("Job title")).to_have_value("QA Engineer")
+    ui.wait_for_function("position => Math.abs(window.scrollY - position) < 2", arg=last_scroll)
+    new_tab = ui.context.new_page()
+    try:
+        new_tab.goto(ui.url)
+        expect(new_tab.get_by_label("Job title")).to_have_value("QA Engineer")
+        saved = new_tab.get_by_test_id("found-jobs").locator("tr", has_text="Globex (fictional)")
+        expect(saved.get_by_role("link", name="Open application")).to_be_visible()
+    finally:
+        new_tab.close()
 
 
 def test_a_gap_you_really_have_can_be_added_and_used(ui: Page):

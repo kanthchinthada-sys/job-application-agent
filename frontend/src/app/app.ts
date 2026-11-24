@@ -8,7 +8,8 @@ import { Me } from './models';
 /** Forget everything this browser tab kept for the signed-in account (searches, filters, scroll positions). */
 export function clearSessionState() {
   try {
-    Object.keys(sessionStorage).filter(k => k.startsWith('job-agent.')).forEach(k => sessionStorage.removeItem(k));
+    Object.keys(sessionStorage).filter(k => k.startsWith('job-agent.') || k === 'find-jobs-state-v1')
+      .forEach(k => sessionStorage.removeItem(k));
   } catch { /* storage unavailable */ }
 }
 

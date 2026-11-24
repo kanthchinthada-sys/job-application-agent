@@ -77,6 +77,13 @@ CREATE TABLE IF NOT EXISTS intake_runs (
     updated_at      TEXT NOT NULL
 );
 
+-- Keep the most recent completed free search in this workspace so any app tab can resume it.
+CREATE TABLE IF NOT EXISTS last_job_search (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    filters TEXT NOT NULL,
+    result TEXT NOT NULL
+);
+
 -- Append-only history: every status change is recorded with its timestamp.
 CREATE TABLE IF NOT EXISTS application_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

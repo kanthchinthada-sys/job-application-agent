@@ -12,7 +12,7 @@ def test_score_extraction_fuzzy_matching():
 def test_run_produces_summary(fake_llm):
     def answer(system, user, schema):
         fake_llm.calls.append(1)
-        if "text" in schema["properties"]:
+        if {"text", "examples"} & schema["properties"].keys():
             return {"text": "I build pytest suites for a payments API.", "fact_ids_used": ["F4"]}
         return {"required_skills": ["Python", "Docker", "Java"], "preferred_skills": []}
     fake_llm.generate_json = answer

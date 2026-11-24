@@ -112,6 +112,60 @@ def test_letter_keeps_the_best_example_and_never_repeats_the_application_line(fa
     assert "validated Kubernetes and Helm" in letter
 
 
+def test_structured_letter_checks_each_story_against_its_own_records(fake_llm):
+    p = with_bank()
+    facts = {f.text.split(": ", 1)[-1]: f.id for f in drafting.build_facts(bank_profile(p))}
+    records = {r.id: r.text for r in p.experience_bank}
+    framework, deployment = facts[records["CH01"]], facts[records["CH04"]]
+    fake_llm.answer = {
+        "opening": "I am interested in the role's focus on API testing and test automation.",
+        "examples": [
+            {"id": "S1", "sentences": [
+                {"text": "I developed reusable Java API automation for microservices using REST Assured and JUnit 5.",
+                 "fact_ids": [framework]},
+                {"text": "I improved coverage by 80 percent.", "fact_ids": [framework]},
+            ]},
+            {"id": "S2", "sentences": [
+                {"text": "I validated Kubernetes and Helm upgrade paths and service readiness across cloud and edge.",
+                 "fact_ids": [deployment]},
+                {"text": "I led Kubernetes migrations.", "fact_ids": [framework]},
+            ]},
+        ],
+        "closing": "I would welcome a conversation about Java API automation for this role.",
+    }
+    letter, review = drafting.draft(fake_llm, p, SDET_JOB, "cover_letter")
+    assert review.method == "evidence_cover_letter_v2"
+    assert len(letter.split("\n\n")) == 6 and len(review.stories) == 2
+    assert "focus on API testing" in letter
+    assert "REST Assured" in letter and "Kubernetes and Helm" in letter
+    assert "80 percent" not in letter and "led Kubernetes migrations" not in letter
+    assert len(review.removed) == 2
+
+
+def test_a_work_example_is_not_repeated_across_letter_paragraphs():
+    from app import cover_letter
+
+    p = with_bank()
+    facts = {f.text.split(": ", 1)[-1]: f for f in drafting.build_facts(bank_profile(p))}
+    records = {r.id: r.text for r in p.experience_bank}
+    framework, deployment = facts[records["CH01"]], facts[records["CH04"]]
+    cards = [
+        cover_letter.StoryCard(id="S1", requirement="API testing", facts=[framework]),
+        cover_letter.StoryCard(id="S2", requirement="Kubernetes", facts=[deployment, framework]),
+    ]
+    repeated = cover_letter.StorySentence(
+        text="At Contoso Health, I developed reusable Java API automation using REST Assured and JUnit 5.",
+        fact_ids=[framework.id])
+    answer = cover_letter.StoryDraft(examples=[
+        cover_letter.StoryParagraph(id="S1", sentences=[repeated]),
+        cover_letter.StoryParagraph(id="S2", sentences=[repeated]),
+    ])
+    letter, review = cover_letter.assemble(answer, cards, p, SDET_JOB)
+    assert letter.count("REST Assured") == 1
+    assert "validated Kubernetes and Helm" in letter
+    assert review.final_check["problems"] == []
+
+
 def test_a_sentence_saying_why_an_example_matters_needs_no_record():
     j = SDET_JOB
     assert drafting.is_relevance_sentence("That matters for a team whose release gates must stay deterministic.", j)

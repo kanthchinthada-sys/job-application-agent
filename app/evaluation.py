@@ -131,6 +131,7 @@ def run(llm: LLMClient, cases_path: Path = CASES, profile_path: Path = PROFILE, 
 
 def prompts() -> dict[str, str]:
     """Every system prompt the app sends to a model."""
+    from app import cover_letter
     return {
         "extraction": extraction.SYSTEM_PROMPT,
         "drafting": drafting.SYSTEM_PROMPT,
@@ -140,6 +141,7 @@ def prompts() -> dict[str, str]:
         "ai_match": ai_match.SYSTEM,
         "job_intake": job_intake.AI_SYSTEM,
         "task_cover_letter": drafting._task("cover_letter", ""),
+        "cover_letter_stories": cover_letter.TASK,
         "letter_repair": drafting.LETTER_REPAIR_SYSTEM,
         "task_screening_answer": drafting._task("screening_answer", "{question}"),
     }

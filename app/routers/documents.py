@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ValidationError
 
 from app import drafting, repository, resume_render, tailoring
-from app.errors import ConflictError
+from app.errors import ConflictError, NotFoundError
 from app.dependencies import get_connection
 from typing import Literal
 
@@ -132,6 +132,15 @@ def print_resume(document_id: Id, conn: Conn):
     """Printable page for a document (the formatted resume, or a letter). In the browser: Print > Save as PDF."""
     doc = repository.get_document(conn, document_id)
     app = repository.get_application(conn, doc.application_id)
+    if doc.kind == "cover_letter":
+        try:
+            profile = repository.get_profile(conn)
+        except NotFoundError:
+            pass
+        else:
+            contact = profile.contact.model_dump(mode="json")
+            return HTMLResponse(resume_render.render_letter(doc.content, profile.full_name, contact,
+                                                            app.job_title, app.company))
     if doc.kind != "resume":
         return HTMLResponse(_text_page(doc.content, f"{_KIND_NAME.get(doc.kind, 'Document')} · {app.job_title} at "
                                                     f"{app.company}"))

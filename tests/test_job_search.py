@@ -133,6 +133,9 @@ def test_search_api_and_apply_saves_the_job_and_starts_the_application(search_cl
     again = search_client.post("/search/apply", json={"job": first}).json()          # no duplicates
     assert (again["job_id"], again["application_id"]) == (applied["job_id"], applied["application_id"])
     assert again["new_job"] is False and again["new_application"] is False
+    saved = search_client.get("/search/latest").json()
+    assert saved["filters"] == body and saved["applications"][first["url"]] == applied["application_id"]
+    assert next(j for j in saved["result"]["results"] if j["url"] == first["url"])["already_added_job_id"] == applied["job_id"]
     marked = search_client.post("/search", json=body).json()["results"]
     assert next(j for j in marked if j["url"] == first["url"])["already_added_job_id"] == applied["job_id"]
     status = search_client.get(f"/applications/{applied['application_id']}").json()["status"]
@@ -165,7 +168,7 @@ class SchemaLLM:
             return {"bullets": []}
         if "sentences" in props:
             return {"sentences": []}
-        if "text" in props:
+        if {"text", "examples"} & props.keys():
             return {"text": "FICTIONAL letter: I build pytest suites for a payments API.", "fact_ids_used": []}
         if "items" in props:
             return {"items": []}

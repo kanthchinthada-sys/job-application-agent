@@ -72,6 +72,15 @@ import { Msg, MsgBox } from '../../ui';
     </div>
     <details class="block">
       <summary><b>Writing diagnostics</b>: requirements it was written around, profile facts used, style check</summary>
+      @if (r.stories?.length) {
+        <p class="small"><b>Experience used in the letter</b></p>
+        @for (story of r.stories; track $index) {
+          <div class="small">
+            <b>{{ story.requirement }}</b>
+            <ul class="small muted">@for (record of story.records; track record.id) { <li>{{ record.id }} · {{ record.text }}</li> }</ul>
+          </div>
+        }
+      }
       @if (r.priorities?.length) {
         <p class="small"><b>Written around the job's top requirements</b></p>
         <ol class="small muted">@for (p of r.priorities; track $index) { <li>{{ p.requirement }} <span class="label">{{ p.fact_ids.join(', ') }}</span></li> }</ol>

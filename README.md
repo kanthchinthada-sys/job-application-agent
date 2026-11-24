@@ -116,7 +116,8 @@ works (rules instead of AI for reading postings; your own wording for resumes an
    **experience bank** (a longer list of numbered achievements per employer): each job then gets the ones that
    fit it best.
 2. **Find jobs**: enter a job title, pick a country and a date range. The app searches free job sources and
-   shows matching postings, newest first.
+   shows matching postings, newest first. Returning to Find jobs restores the tab's filters and results.
+   A new tab can recover the workspace's last completed free search without calling the job sources again.
 3. **Apply** on a result: the employer's page opens in a new tab, and the app saves the job and prepares your
    tailored resume and cover letter. Review them under **Applications → Materials**, print the resume to PDF,
    and apply on the employer's page yourself.
@@ -319,11 +320,11 @@ How drafts stay honest (`app/drafting.py`):
 - Deterministic checks then flag: numbers not in your profile or the posting, job skills your profile doesn't
   evidence, unknown fact ids, sentences that look lifted from the job posting, and (cover letters) sentences whose
   details none of your facts state ("fraud detection" when your facts never mention it).
-- Cover letters use evidence for the posting's strongest supported priorities. With a verified experience bank,
-  the letter shares the résumé's evidence plan and uses up to two examples, with one employer or personal
-  project per example. The draft connects each example to the role in plain language. The app checks each
-  sentence and can ask the model to repair flagged wording once. It checks the repaired sentences again and
-  can fall back to your original facts when a rewrite fails.
+- Cover letters open with a specific interest in the role, then tell up to two examples from the candidate's
+  experience. Each example uses records from one employer or personal project and includes an outcome when
+  the records support one. The app checks every factual sentence against its cited records. If a sentence fails
+  review, the example can use the original facts. The records used are shown under **Writing diagnostics**.
+  If you want a fuller example, add the situation, your action, and the outcome to your experience bank.
 - Screening answers get one revise pass; a revision is kept only if it is no less honest.
 - The greeting and your signature are added by the app, never by the model.
 
@@ -509,7 +510,8 @@ Requests flow **router → repository → SQLite**, and the match endpoint addit
 | PATCH | `/jobs/{id}` | Fix a job's title, company, location, description or skills |
 | POST | `/jobs/{id}/refresh` | Read the full posting again from the job's link |
 | GET | `/search/countries` | Countries Find jobs can search |
-| POST | `/search` | Find jobs by title, country and date range (not saved) |
+| POST | `/search` | Find jobs by title, country and date range and save the results in the workspace |
+| GET | `/search/latest` | Restore the last completed free search and links to its saved applications |
 | POST | `/search/apply` | Save a found job and start its application (never submits) |
 | POST / GET | `/jobs` | Add a job / list jobs |
 | GET | `/jobs/{id}` | One job |

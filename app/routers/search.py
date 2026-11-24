@@ -32,6 +32,12 @@ class SearchRequest(StrictModel):
     date_to: date
 
 
+class SavedSearch(BaseModel):
+    filters: SearchRequest
+    result: job_search.SearchResult
+    applications: dict[str, int]
+
+
 class ApplyRequest(StrictModel):
     job: job_search.FoundJob
 
@@ -61,9 +67,33 @@ def _prefs_boards(conn) -> list[str]:
         return []
 
 
+@router.get("/latest", response_model=SavedSearch | None)
+def latest_search(conn: Conn):
+    """Return this workspace's results without calling any job source again."""
+    row = conn.execute("SELECT filters, result FROM last_job_search WHERE id = 1").fetchone()
+    if row is None:
+        return None
+    result = job_search.SearchResult.model_validate_json(row["result"])
+    applications = {}
+    for job in result.results:
+        saved = conn.execute(
+            """SELECT jobs.id, applications.id AS application_id FROM jobs
+               LEFT JOIN applications ON applications.job_id = jobs.id
+               WHERE source_url = ? OR (title = ? COLLATE NOCASE AND company = ? COLLATE NOCASE)
+               ORDER BY source_url = ? DESC LIMIT 1""",
+            (job.url, job.title, job.company, job.url),
+        ).fetchone()
+        if saved:
+            job.already_added_job_id = saved["id"]
+            if saved["application_id"]:
+                applications[job.url] = saved["application_id"]
+    return SavedSearch(filters=SearchRequest.model_validate_json(row["filters"]), result=result,
+                       applications=applications)
+
+
 @router.post("", response_model=job_search.SearchResult, responses={422: {"description": "Bad filters"}})
 def search(body: SearchRequest, request: Request, conn: Conn):
-    """Find jobs by title, country and date range across free job sources. Nothing is saved."""
+    """Find jobs across free sources and remember the results for this workspace."""
     code = body.country.upper()
     if code not in job_search.COUNTRIES:
         raise HTTPException(status_code=422, detail=f"Unknown country {body.country}.")
@@ -77,6 +107,9 @@ def search(body: SearchRequest, request: Request, conn: Conn):
     for j in result.results:
         row = conn.execute("SELECT id FROM jobs WHERE source_url = ?", (j.url,)).fetchone()
         j.already_added_job_id = row["id"] if row else None
+    conn.execute("INSERT OR REPLACE INTO last_job_search (id, filters, result) VALUES (1, ?, ?)",
+                 (body.model_copy(update={"country": code}).model_dump_json(), result.model_dump_json()))
+    conn.commit()
     return result
 
 

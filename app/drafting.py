@@ -82,6 +82,7 @@ class DraftReview(BaseModel):
     claim_checks: list[dict] = []       # per sentence that failed a claim check: what it claimed, why it failed,
                                         # what was done (rewritten by the AI / rewritten from your record / left
                                         # out) and the records it was checked against (app/claims.py)
+    stories: list[dict] = Field(default_factory=list)
 
 
 def build_facts(profile: Profile) -> list[Fact]:
@@ -572,7 +573,23 @@ def draft(llm: LLMClient, profile: Profile, job: JobOut, kind: Kind, question: s
         used, warnings = review_draft(body, cited, facts, profile, job)
         return used, warnings, humanizer.report(body)
 
-    answer = _ask(llm, user, schema)
+    if kind == "cover_letter" and not legacy:
+        from app import cover_letter
+        cards = cover_letter.story_cards(profile, job, facts, priorities)
+        prompt = user.rsplit("\n\nTASK\n", 1)[0] + cover_letter.prompt(cards)
+        raw = metrics.call(llm, "cover letter prose", SYSTEM_PROMPT, prompt,
+                           cover_letter.StoryDraft.model_json_schema())
+        if isinstance(raw, dict) and "examples" in raw:
+            try:
+                structured = cover_letter.StoryDraft.model_validate(raw)
+            except ValidationError:
+                structured = cover_letter.StoryDraft(examples=[])
+            lap("AI writing")
+            return cover_letter.assemble(structured, cards, profile, job)
+        # Older clients returned one text field. Continue to check and repair it.
+        answer = _validate_draft(raw)
+    else:
+        answer = _ask(llm, user, schema)
     lap("AI writing")
     body = clean_body(answer.text) if kind == "cover_letter" else answer.text.strip()
     cited = answer.fact_ids_used
@@ -1590,7 +1607,10 @@ def _drop_copied_sentences(body: str, warnings: list[str]) -> tuple[str, list[st
 
 def _ask(llm: LLMClient, user: str, schema: dict, purpose: str = "cover letter") -> _ModelDraft:
     from app import metrics
-    raw = metrics.call(llm, purpose, SYSTEM_PROMPT, user, schema)
+    return _validate_draft(metrics.call(llm, purpose, SYSTEM_PROMPT, user, schema))
+
+
+def _validate_draft(raw: dict) -> _ModelDraft:
     try:
         return _ModelDraft.model_validate(raw)
     except ValidationError as exc:

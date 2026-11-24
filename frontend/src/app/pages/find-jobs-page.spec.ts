@@ -12,14 +12,17 @@ const JOB = {
 describe('FindJobsPage', () => {
   beforeEach(() => sessionStorage.clear());
 
-  async function render() {
+  async function render(settings = { ...SETTINGS, configured: false }) {
     const ctx = setup([FindJobsPage]);
     const fixture = TestBed.createComponent(FindJobsPage);
     fixture.detectChanges();
+    ctx.http.expectOne('/search/latest').flush(null);
     ctx.http.expectOne('/search/countries').flush({
       countries: [{ code: 'CA', name: 'Canada', adzuna: true }, { code: 'US', name: 'United States', adzuna: true }],
       adzuna_configured: false,
     });
+    await settle(fixture);
+    ctx.http.expectOne('/search/apify').flush({ settings, latest: null });
     await settle(fixture);
     ctx.http.expectOne('/profile').flush({ full_name: 'Jordan (fictional)',
       preferences: { target_roles: ['QA Engineer'], locations: ['Canada'] } });
@@ -79,6 +82,30 @@ describe('FindJobsPage', () => {
     expect((again.nativeElement.querySelector('#f-title') as HTMLInputElement).value).toBe('QA Engineer');
   });
 
+  it('recovers the previous search and application links in a new tab without searching again', async () => {
+    const { http } = setup([FindJobsPage]);
+    const fixture = TestBed.createComponent(FindJobsPage);
+    fixture.detectChanges();
+    http.expectOne('/search/countries').flush({
+      countries: [{ code: 'US', name: 'United States', adzuna: true }], adzuna_configured: false,
+    });
+    http.expectOne('/search/latest').flush({
+      filters: { title: 'QA Automation Lead', country: 'US', date_from: '2026-11-08', date_to: '2026-11-14' },
+      result: { method: 'job_search_v1', query: 'QA Automation Lead', country: 'United States',
+        date_from: '2026-11-08', date_to: '2026-11-14', results: [JOB], sources: [] },
+      applications: { [JOB.url]: 31 },
+    });
+    await settle(fixture);
+    http.expectOne('/search/apify').flush({ settings: { ...SETTINGS, configured: false }, latest: null });
+    await settle(fixture);
+    http.expectNone('/search');
+    http.expectNone('/profile');
+    expect((fixture.nativeElement.querySelector('#f-title') as HTMLInputElement).value).toBe('QA Automation Lead');
+    expect((fixture.nativeElement.querySelector('#f-country') as HTMLSelectElement).value).toBe('US');
+    expect(fixture.nativeElement.querySelector('a[href="/applications/31"]')).toBeTruthy();
+    expect(text(fixture)).toContain('Globex (fictional)');
+  });
+
   const SETTINGS = { configured: true, actor: 'jobo.world/ats-jobs-api', max_results: 25, timeout_secs: 120,
                      max_cost_usd: 0.2, reuse_minutes: 60 };
   const RUN = { id: 4, status: 'RUNNING', message: '', actor: 'jobo.world/ats-jobs-api',
@@ -93,9 +120,7 @@ describe('FindJobsPage', () => {
 
   it('runs the paid Apify search on request, shows progress and merges its results', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    const { fixture, http } = await render();
-    http.expectOne('/search/apify').flush({ settings: SETTINGS, latest: null });
-    await settle(fixture);
+    const { fixture, http } = await render(SETTINGS);
     expect(text(fixture)).toContain('Paid: up to 25 jobs from employer career sites');
     button(fixture, 'Search').click();
     http.expectOne('/search').flush({ method: 'job_search_v1', query: 'QA Engineer', country: 'Canada',
@@ -122,17 +147,13 @@ describe('FindJobsPage', () => {
   });
 
   it('says how to turn Apify on when it is not set up, and shows errors clearly', async () => {
-    const { fixture, http } = await render();
-    http.expectOne('/search/apify').flush({ settings: { ...SETTINGS, configured: false }, latest: null });
-    await settle(fixture);
+    const { fixture } = await render();
     expect(text(fixture)).toContain('add APIFY_API_TOKEN to .env');
     expect(() => button(fixture, 'Search career sites (Apify)')).toThrow();
   });
 
   it('shows the reason when Apify refuses a search', async () => {
-    const { fixture, http } = await render();
-    http.expectOne('/search/apify').flush({ settings: SETTINGS, latest: null });
-    await settle(fixture);
+    const { fixture, http } = await render(SETTINGS);
     button(fixture, 'Search career sites (Apify)').click();
     http.expectOne(r => r.method === 'POST' && r.url === '/search/apify').flush(
       { detail: 'Apify refused the token (HTTP 401): check APIFY_API_TOKEN in .env.' }, { status: 502, statusText: 'Bad Gateway' });

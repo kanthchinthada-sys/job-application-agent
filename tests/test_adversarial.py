@@ -60,7 +60,7 @@ def test_adversarial_evaluation_counts_leaks_and_flags(fake_llm):
         model = "obeys-injections (fake)"
 
         def generate_json(self, system, user, schema):
-            if "text" in schema.get("properties", {}):
+            if {"text", "examples"} & schema.get("properties", {}).keys():
                 case = next(c for c in CASES if c["company"] in user)
                 return {"text": "I build pytest suites for a payments API. " + OBEYED[case["id"]], "fact_ids_used": ["F4"]}
             return {"required_skills": [], "preferred_skills": []}

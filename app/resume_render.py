@@ -207,15 +207,14 @@ def render_letter(text: str, name: str, contact: dict, job_title: str, company: 
     paragraphs = "".join(f"<p>{escape(p)}</p>" for p in text.split("\n\n"))
     paragraphs = paragraphs.replace("\n", "<br>")
     return f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>{escape(name)} - Cover letter - {escape(company)}</title>
+<html lang="en"><head><meta charset="utf-8"><title>{escape(name)} - Cover letter for {escape(job_title)} at {escape(company)}</title>
 <style>
 {_page_css("0.8in", "0.8in")}
   body {{ font: 11pt/1.4 "Times New Roman", Times, serif; color:#000; max-width: 6.9in; margin: 24px auto; }}
   h1 {{ font-size: 22pt; margin: 0 0 2px; }} .contact {{ font-size: 10pt; }}
   hr.rule {{ border: 0; border-top: 2.5px solid #000; margin: 4px 0 18px; }}
-  p {{ margin: 0 0 10px; text-align: justify; }}
+  p {{ margin: 0 0 10px; text-align: left; }}
 </style></head><body>
 {_sheet(f'''<div class="smart-justify" data-print-width="6.9in"><h1>{escape(name)}</h1><div class="contact">{contact_line}</div><hr class="rule">
-<p>Re: {escape(job_title)}, {escape(company)}</p>
 {paragraphs}</div>''')}
 </body></html>"""

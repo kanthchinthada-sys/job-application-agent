@@ -74,6 +74,12 @@ export class Api {
   searchJobs(body: { title: string; country: string; date_from: string; date_to: string }) {
     return this.call(this.http.post<SearchResult>('/search', body));
   }
+  latestSearch() {
+    return this.call(this.http.get<{
+      filters: { title: string; country: string; date_from: string; date_to: string };
+      result: SearchResult; applications: Record<string, number>;
+    } | null>('/search/latest'));
+  }
   applyFound(job: FoundJob) { return this.call(this.http.post<ApplyResult>('/search/apply', { job })); }
   /** Apify: whether it is set up (the token never comes to the browser), its limits, and your latest run. */
   apifyStatus() { return this.call(this.http.get<{ settings: ApifySettings; latest: ApifyRun | null }>('/search/apify')); }
