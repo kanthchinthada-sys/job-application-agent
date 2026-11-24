@@ -148,6 +148,22 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
           }
         </details>
       }
+      @if (r.priorities?.length) {
+        <details class="small" data-testid="evidence-priorities"><summary>What this posting screens for, and your evidence</summary>
+          @for (p of r.priorities; track $index) {
+            <div><b>{{ p.match }}</b> · {{ p.ask }} <span class="muted">{{ p.records?.length ? '· records ' + p.records.join(', ') : '· no record shows this' }}{{ p.main ? '' : ' · not in the summary' }}</span></div>
+          }
+        </details>
+      }
+      @if (r.final_check?.fixed?.length || r.final_check?.problems?.length || r.final_check?.first_third?.record) {
+        <details class="small" data-testid="final-check"><summary>Final check before handing it back</summary>
+          @if (r.final_check.first_third?.record) {
+            <div>Strongest evidence for the first priority: {{ r.final_check.first_third.record }} ({{ r.final_check.first_third.where }})</div>
+          }
+          @for (x of r.final_check.fixed; track $index) { <div class="muted">Fixed: {{ x }}</div> }
+          @for (x of r.final_check.problems; track $index) { <div class="warn-text">Check: {{ x }}</div> }
+        </details>
+      }
       @if (r.core_skills?.length) {
         <details class="small" data-testid="core-skills-evidence"><summary>Core Skills: why each skill is listed</summary>
           @for (s of r.core_skills; track $index) {

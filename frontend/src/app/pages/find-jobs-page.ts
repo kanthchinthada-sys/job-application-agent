@@ -1,10 +1,10 @@
-import { Component, inject, OnInit, signal } from '@angular/core';
+import { Component, computed, inject, OnInit, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 
 import { Api, ApiError } from '../api';
 import { daysAgo, FindJobsState, today } from '../find-jobs-state';
-import { CountryOption, FoundJob } from '../models';
+import { ApifyRun, CountryOption, FoundJob } from '../models';
 import { Msg, MsgBox } from '../ui';
 
 /** Find jobs: three filters (title, country, date range) across free job sources; Apply prepares everything. */
@@ -30,6 +30,27 @@ import { Msg, MsgBox } from '../ui';
         }
       </div>
       <div><button class="primary" type="button" [disabled]="busy()" (click)="search()">{{ busy() ? 'Searching…' : 'Search' }}</button></div>
+      <div class="apify small" data-testid="apify">
+        @if (state.apifySettings(); as a) {
+          @if (a.configured) {
+            <button class="secondary" type="button" [disabled]="state.apifyRun()?.active" (click)="searchApify()">
+              {{ state.apifyRun()?.active ? 'Apify search running…' : 'Search career sites (Apify)' }}</button>
+            <span class="muted"> Paid: up to {{ a.max_results }} jobs from employer career sites, stops after
+              {{ a.timeout_secs }} s, at most {{ money(a.max_cost_usd) }} a search.</span>
+          } @else {
+            <span class="muted">Employer career sites (Apify, paid) are off: add APIFY_API_TOKEN to .env and restart
+              the app (see docs/apify.md).</span>
+          }
+        }
+        @if (state.apifyRun(); as run) {
+          <div data-testid="apify-progress" [class.warn-text]="isFailed(run.status)">
+            @if (run.active) { <span class="spinner"></span> }
+            Apify search "{{ run.filters.title }}" ({{ run.filters.date_from }} to {{ run.filters.date_to }}):
+            {{ statusText(run) }}
+          </div>
+        }
+        @if (state.apifyError()) { <div class="warn-text" data-testid="apify-error">{{ state.apifyError() }}</div> }
+      </div>
       @if (msg()?.kind === 'bad') { <app-msg [msg]="msg()" /> }
       @if (result(); as r) {
         <p class="small muted" data-testid="sources">
@@ -54,14 +75,18 @@ import { Msg, MsgBox } from '../ui';
     @if (busy()) {
       <div class="card empty" data-testid="searching"><span class="spinner"></span> Searching the job sources… this takes a few seconds.</div>
     }
-    @if (result(); as r) {
+    @if (result() || apifyJobs().length) {
       <div class="card" data-testid="found-jobs">
-        <p class="small" style="margin-top:0"><b>{{ r.results.length }} jobs</b> in {{ r.country }}, posted {{ r.date_from }} to {{ r.date_to }}.</p>
-        @if (r.results.length) {
+        @if (result(); as r) {
+          <p class="small" style="margin-top:0"><b>{{ jobs().length }} jobs</b> in {{ r.country }}, posted {{ r.date_from }} to {{ r.date_to }}{{ apifyJobs().length ? ' (including employer career sites from Apify)' : '' }}.</p>
+        } @else {
+          <p class="small" style="margin-top:0"><b>{{ jobs().length }} jobs</b> from employer career sites (Apify).</p>
+        }
+        @if (jobs().length) {
           <table>
             <thead><tr><th>Job</th><th>Where</th><th>Posted</th><th>Source</th><th></th></tr></thead>
             <tbody>
-              @for (j of r.results; track j.url) {
+              @for (j of jobs(); track j.url) {
                 <tr>
                   <td><b><a [href]="j.url" target="_blank" rel="noopener">{{ j.title }}</a></b><br>
                     <span class="muted small">{{ j.company }}</span></td>
@@ -113,10 +138,28 @@ export class FindJobsPage implements OnInit {
   protected readonly dateTo = this.state.dateTo;
   protected readonly result = this.state.result;
   protected readonly countries = signal<CountryOption[]>([]);
+  protected readonly apifyJobs = computed(() => {
+    const run = this.state.apifyRun();
+    return run && run.status === 'SUCCEEDED' ? run.results : [];
+  });
+  /** Your free results and the Apify results in one list: the same job once (title and company), the employer's
+   * own career-site link preferred over an aggregator's. */
+  protected readonly jobs = computed(() => {
+    const key = (j: FoundJob) => `${j.title}|${j.company}`.toLowerCase().replace(/\W+/g, ' ').trim();
+    const aggregator = (j: FoundJob) => /adzuna|jooble|jsearch/i.test(j.source) || j.description_is_excerpt;
+    const out = new Map<string, FoundJob>();
+    for (const j of this.result()?.results ?? []) out.set(key(j), j);
+    for (const j of this.apifyJobs()) {
+      const old = out.get(key(j));
+      if (!old || aggregator(old)) out.set(key(j), j);
+    }
+    return [...out.values()].sort((a, b) => (b.posted ?? '').localeCompare(a.posted ?? ''));
+  });
   protected readonly busy = signal(false);
   protected readonly msg = signal<Msg | null>(null);
 
   async ngOnInit() {
+    this.state.loadApify();                         // its settings and your latest run (not awaited: optional)
     try {
       const c = await this.api.searchCountries();
       this.countries.set(c.countries);
@@ -165,6 +208,33 @@ export class FindJobsPage implements OnInit {
     } finally {
       this.busy.set(false);
     }
+  }
+
+  /** Start the paid Apify search with the same filters (an explicit choice; the free results stay usable). */
+  searchApify() {
+    if (this.title().trim().length < 2) {
+      this.msg.set({ kind: 'bad', text: 'Enter a job title.' });
+      return;
+    }
+    this.state.startApify({ title: this.title().trim(), country: this.country(), date_from: this.dateFrom(),
+                            date_to: this.dateTo() });
+  }
+
+  protected money(usd: number) { return 'US' + String.fromCharCode(36) + usd.toFixed(2); }
+
+  protected isFailed(status: string) { return ['FAILED', 'ABORTED', 'TIMED-OUT', 'ERROR'].includes(status); }
+
+  protected statusText(run: ApifyRun): string {
+    if (run.active) {
+      const secs = Math.max(0, Math.round((Date.now() - Date.parse(run.started_at)) / 1000));
+      return `running on Apify (${secs} s of at most ${run.timeout_secs} s)… your other results stay usable.`;
+    }
+    if (run.status === 'SUCCEEDED') {
+      const cost = run.cost_usd != null ? `, cost ${this.money(run.cost_usd)}` : '';
+      const reused = run.reused === 'recent' ? ' (the same search from earlier: not charged again)' : '';
+      return `done: ${run.found ?? 0} found, ${run.kept} kept for your filters${cost}.${reused}`;
+    }
+    return `${run.status.toLowerCase()}: ${run.message || 'no results'}`;
   }
 
   apply(j: FoundJob) {

@@ -1,3 +1,4 @@
+import re
 """Regression: a posting's either-or skill ("Playwright or Selenium") must never put the option you don't have on
 your resume, in a letter or in an answer. Only skills your profile backs are listed. All data FICTIONAL."""
 
@@ -381,7 +382,7 @@ def test_a_tool_is_told_with_the_work_it_was_used_for(job_id, client, banked):
     assert claims.tool_context_problems("I validated data pipelines using SQL and Jenkins jobs.") == []
 
 
-def test_a_letter_has_a_paragraph_per_employer_projects_apart_and_record_ids_in_the_review(client, fake_llm, job_id,
+def test_a_letter_tells_two_examples_naming_each_employer_and_keeps_projects_apart(client, fake_llm, job_id,
                                                                                          banked):
     client.put("/profile", json=banked)
     app_id = client.post("/applications", json={"job_id": job_id}).json()["id"]
@@ -398,15 +399,18 @@ def test_a_letter_has_a_paragraph_per_employer_projects_apart_and_record_ids_in_
     letter = client.post(f"/applications/{app_id}/drafts", json={"kind": "cover_letter"}).json()
     paras = letter["content"].split("\n\n")[1:-1]          # without the greeting and the signature
     assert paras[0].endswith("I build API test automation in Python.")              # the opening, kept true
-    example = next(p for p in paras if "Example Corp" in p)
-    sample = next(p for p in paras if "Sample Systems" in p)
-    project = next(p for p in paras if "release bot" in p)
-    assert example.startswith("At Example Corp") and "Sample Systems" not in example and "release bot" not in example
-    assert "Kubernetes through Jenkins pipelines" in example                         # its own employer's paragraph
-    assert sample.startswith("At Sample Systems") and sample.count("Sample Systems") == 1
-    assert "configured the checkout Selenium regression job in Jenkins using shared DSL" in sample
-    assert project.startswith("In a personal project") or "personal project" in project.split(".")[0]
-    assert paras.index(project) > max(paras.index(example), paras.index(sample))      # after the employers
+    # paragraphs follow the posting's priorities; every example says where it was done, at its start
+    sentences = [x for p in paras[1:] for x in re.split(r"(?<=[.!?])\s+", p) if x]
+    selenium = next(x for x in sentences if "Selenium and Java" in x)
+    assert selenium.startswith("At Sample Systems, I") and not selenium.endswith("at Sample Systems.")
+    assert not any(re.match(r"^At Example,", x) for x in sentences)                   # the employer's full name
+    assert any(x.startswith("At Example Corp, I") for x in sentences)
+    assert not any("registered checkout" in x.lower() for x in sentences)              # never the internal wording
+    examples = [p for p in paras[1:-1] if "personal project" not in p]
+    assert 1 <= len(examples) <= 2, examples                                         # the two shared examples
+    for p in paras:
+        if "release bot" in p:
+            assert "personal project" in p and "Example Corp" not in p and "Sample Systems" not in p
     assert len(letter["content"].split()) <= 320
     checks = letter["review"]["claim_checks"]
     opening = next(c for c in checks if "customers" in c["sentence"])
@@ -414,8 +418,9 @@ def test_a_letter_has_a_paragraph_per_employer_projects_apart_and_record_ids_in_
     assert {r["id"] for r in opening["records"]} & {"EX01", "EX02", "EX03"}          # checked against these records
     assert all(r["id"] in {"EX01", "EX02", "EX03", "EX04", "SS01", "SS02", "SS03", "PR01"} or r["id"].startswith("F")
                for c in checks for r in c["records"] + c["now_records"])
-    reworded = next(c for c in checks if c["sentence"].startswith("I registered"))
-    assert reworded["now_records"][0]["id"] == "SS02"                                 # the record behind the wording
+    reworded = next((c for c in checks if c["sentence"].startswith("I registered")), None)
+    if reworded:
+        assert reworded["now_records"][0]["id"] == "SS02"                             # the record behind the wording
     import html
     printed = html.unescape(client.get(f"/documents/{letter['id']}/print").text)
     text = client.get(f"/documents/{letter['id']}/download").text

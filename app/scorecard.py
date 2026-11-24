@@ -62,11 +62,17 @@ def family(title: str, description: str) -> Family:
         name = "fde_infra" if score["infra"] >= 4 else "fde_app"
         label = ("Forward Deployed Engineer (deployment / infrastructure)" if name == "fde_infra"
                  else "Forward Deployed Engineer (building product for customers)")
-    elif re.search(r"\b(lead|manager|head)\b", t) and re.search(r"qa|quality|test|qe\b", t):
+    elif re.search(r"\b(ai|ml|llm|genai|machine learning)\b", t) and re.search(r"qa|quality|test|evaluat|evals?\b", t):
+        name, label = "ai_qa", "AI QA / LLM evaluation"
+    elif re.search(r"\b(manager|head of|director)\b", t) and re.search(r"qa|quality|test|qe\b", t):
+        name, label = "manager", "QA Manager"
+    elif re.search(r"\b(lead|head)\b", t) and re.search(r"qa|quality|test|qe\b", t):
         name = "data_lead" if data_heavy else "lead"
         label = "QA / Test Lead (data validation)" if data_heavy else "QA / Test Lead"
-    elif re.search(r"sdet|in test|automation|quality engineer|qa engineer|test engineer", t) or score["sdet"] >= 4:
+    elif re.search(r"sdet|in test|quality engineer|software engineer", t) and "automation engineer" not in t:
         name, label = "sdet", "SDET / Senior Quality Engineer"
+    elif re.search(r"automation|qa engineer|test engineer|tester", t) or score["sdet"] >= 4:
+        name, label = "qa_automation", "QA Automation Engineer"
     else:
         name, label = "general", "General engineering role"
     return Family(name=name, label=label, data_heavy=data_heavy, ui_heavy=ui_heavy, customer_facing=customer)
@@ -171,6 +177,36 @@ ROLE_RULES: dict[str, list[tuple[str, float, str]]] = {
         (r"automation|framework|jenkins", 1.0, "hands-on automation"),
     ],
 }
+# QA Automation: reusable UI and API automation, framework components, CI execution, diagnosing test failures
+ROLE_RULES["qa_automation"] = [
+    (r"framework|reusable|page object|components?|utilities", 2.5, "reusable automation and framework components"),
+    (r"playwright|selenium|cypress|ui\b|browser|web", 2.0, "UI automation"),
+    (r"rest assured|postman|api|endpoint", 2.0, "API automation"),
+    (r"jenkins|github actions|gitlab|ci\b|pipeline|azure devops|azure pipelines", 2.0, "CI execution"),
+    (r"investigat|diagnos|isolat|root cause|failures?|flak", 2.0, "diagnosing test failures"),
+]
+# Senior SDET: framework ownership, service-level, distributed/async, performance and reliability
+ROLE_RULES["sdet"] = ROLE_RULES["sdet"] + [
+    (r"microservices?|service|distributed|asynchronous|async|event|queue|readiness", 1.5, "service-level and async testing"),
+    (r"\bk6\b|load|latency|throughput|performance|p95|p99", 1.5, "performance testing"),
+]
+# QA Manager: coaching, work allocation, quality metrics, priority and release-risk decisions
+ROLE_RULES["manager"] = [
+    (r"mentor|coach|feedback|expectations|onboard|trained", 3.0, "coaching the team"),
+    (r"prioriti|assign|allocat|scope|planning|coordinat", 2.5, "allocating and planning work"),
+    (r"metrics|report|escape|trend|dashboard|stability|coverage gaps", 2.5, "quality metrics"),
+    (r"release readiness|release risk|go/no-go|sign-off|release decision|roadmap", 2.5, "priority and release decisions"),
+    (r"strategy|risk-based|test plan", 1.5, "test strategy"),
+    (r"triage|defect", 1.0, "defect triage"),
+]
+# AI QA / LLM evaluation: implemented evaluations, regression tests, unsupported-claim checks, failures investigated
+ROLE_RULES["ai_qa"] = [
+    (r"evaluat|deepeval|ragas|metamorphic|faithfulness|relevance", 3.0, "implemented evaluations"),
+    (r"regression|gates?|baseline|consisten", 2.0, "regression tests for model changes"),
+    (r"unsupported|claims?|hallucinat|grounded|evidence references", 2.5, "checks for unsupported claims"),
+    (r"llm|language model|model|prompt|ollama|agent", 1.5, "LLM applications"),
+    (r"investigat|malformed|failure|schema validation|fake model", 2.0, "failures investigated"),
+]
 ROLE_RULES["data_lead"] = ROLE_RULES["lead"] + [
     (r"etl|sql|reconcil|source-to-target|data quality|databricks|pyspark|data factory|transformation", 2.5,
      "ETL / data validation"),
@@ -195,7 +231,7 @@ def role_points(fam: Family, text: str, posting_low: str) -> tuple[float, list[s
         why.append("uses " + ", ".join(named[:3]))
     # bullets that only describe talking about work (not doing it) read as filler, except for lead roles
     if first_verb(text) in ("documented", "demonstrated", "presented", "communicated", "shared", "worked",
-                            "participated", "attended") and fam.name not in ("lead", "data_lead"):
+                            "participated", "attended") and fam.name not in ("lead", "data_lead", "manager"):
         pts -= 4.0
     return pts, why
 

@@ -240,15 +240,19 @@ def ats_pass(resume: "TailoredResume", profile: Profile, job: JobOut) -> tuple[a
         # experience adds "Selenium"; "SQL skills" adds "SQL". Each skill must be backed by your own profile.
         have = {x.lower() for x in resume.skills} | {x.lower() for g in resume.skill_groups for x in g["skills"]}
         from app import core_skills
-        labels = {c for c, _ in core_skills.CATEGORIES} | {"Test automation and API testing"}
-        core_lines = bool(resume.skill_groups) and all(g["name"] in labels for g in resume.skill_groups)
+        labels = {c for c, _ in core_skills.CATEGORIES}
+        core_lines = bool(resume.skill_groups) and all(any(g["name"].startswith(lab) for lab in labels)
+                                                      for g in resume.skill_groups)
         additions = []
         for k in new:
             for term in ats.skill_terms(k.keyword):
                 if term.lower() in have:
                     continue
-                if core_lines and not core_skills.is_listable(term):
-                    continue          # "implementation", "LLM-powered engineering solutions": not a skill to list
+                if core_lines and not (core_skills.is_listable(term) and core_skills._named_tool(term)
+                                       and _core_home(resume, term)):
+                    # Core Skills lines list named tools in their own line: not "monitoring" or "implementation",
+                    # and never Oracle under CI/CD because no data line is shown
+                    continue
                 proof = ats.supports_skill(ptext, term, profile)
                 if proof:
                     have.add(term.lower())
@@ -318,19 +322,32 @@ def _tok(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9/#+-]+", text.lower()) if len(w) > 1 and w not in _GENERIC_TOKENS}
 
 
+def _core_home(resume: "TailoredResume", keyword: str) -> str | None:
+    """The Core Skills line a tool belongs in, when that line is on the resume."""
+    from app import core_skills
+    home = core_skills.category_of(keyword)
+    folded = {"API testing": "Test automation", "Kubernetes and deployment": "CI/CD", "Cloud and messaging": "CI/CD"}
+    for g in resume.skill_groups:
+        if home and (g["name"] == home or g["name"].startswith(home) or g["name"].startswith(folded.get(home, "\0"))):
+            return g["name"]
+    return None
+
+
 def _add_to_group(resume: "TailoredResume", keyword: str, evidence: str) -> None:
     """Put an ATS keyword in the skill group it fits best."""
     if not resume.skill_groups:
         return
     from app import core_skills
-    labels = {c for c, _ in core_skills.CATEGORIES} | {"Test automation and API testing"}
-    home = core_skills.category_of(keyword) if all(g["name"] in labels for g in resume.skill_groups) else None
-    for g in resume.skill_groups:            # a Core Skills line of its own kind ("API testing" -> Postman)
-        if home and (g["name"] == home or g["name"].startswith(home) or
-                     (home == "API testing" and g["name"] == "Test automation and API testing")):
+    labels = {c for c, _ in core_skills.CATEGORIES}
+    home = core_skills.category_of(keyword) if all(any(g["name"].startswith(lab) for lab in labels)
+                                                   for g in resume.skill_groups) else None
+    if home:                                 # a Core Skills line of its own kind ("API testing" -> Postman)
+        line = _core_home(resume, keyword)
+        if line:
+            g = next(x for x in resume.skill_groups if x["name"] == line)
             if keyword not in g["skills"]:
                 g["skills"].append(keyword)
-            return
+        return
     kw, ev = _tok(keyword), _tok(evidence)
 
     def fit(group: dict) -> int:
@@ -435,7 +452,7 @@ def scrub_employers(text: str, profile: Profile) -> str:
         text = re.sub(rf"(?<!\w)[Aa]t {n},\s*", "", text)          # "At Contoso Health, built ..."
         text = re.sub(rf"\s*(?<!\w)(?:at|with|for|in) {n}{end}", "", text)   # "... at Northwind Bank."
     text = re.sub(r"\s{2,}", " ", text).strip()
-    text = re.sub(r"\s+([,.;:])", r"\1", text)
+    text = re.sub(r"\s+([,.;:])(?![A-Za-z0-9])", r"\1", text)
     return text[:1].upper() + text[1:] if text else text
 
 
@@ -497,6 +514,15 @@ def compose_summary(llm: LLMClient, profile: Profile, job: JobOut, selection=Non
             answers = {m.group(0): c.text.strip() for c in answer.sentences if (m := re.search(r"T\d+", c.id or ""))}
     return _finish_summary(profile, job, own, items, from_project, use_ai_sentence, ai_sentence, answers,
                            notes, support, checks)
+
+
+def evidence_priorities(profile: Profile, job: JobOut, plan) -> list[dict]:
+    """The ONE evidence selection both documents use: the posting's main asks in order, each with its strongest
+    records and the match (direct / transferable / missing). The resume summary is written from it, and the
+    cover letter's two examples are its first two asks."""
+    if not plan.priorities:
+        summary_items(profile, job, plan)
+    return plan.priorities
 
 
 def summary_items(profile: Profile, job: JobOut, plan=None):
@@ -576,6 +602,9 @@ _CLIENT = re.compile(r"(?<![\w-])(clients?(?![\w-])|customers?|stakeholders?|bus
                      r"product owners?|end users)\b", re.IGNORECASE)
 
 
+_KNOWN_TECH_LOW = {t.lower() for t in sel.KNOWN_TECH}
+
+
 def _doing(text: str, proof_weight: float = 2.0) -> float:
     """How much a record shows you DOING the work: what you built, led, tested or diagnosed (and a measured result)
     over one that only names a tool; talk about work counts against it."""
@@ -622,10 +651,19 @@ def _plan_summary_items(profile: Profile, plan) -> tuple[list, set[str]]:
         langs = {"java", "python", "typescript", "javascript", "go", "sql", "ruby", "c#", "kotlin", "scala"}
         return bool(re.match(r"\s*\d+\+?\s*years", r.requirement, re.IGNORECASE)) or bool(
             r.found_parts and set(r.found_parts) <= langs)
-    # the posting's main asks first: duties and required work before nice-to-haves, in the posting's own order
-    rows.sort(key=lambda r: (background_line(r), -weight[r.kind], -shown[r.strength], order[id(r)]))
+    # what this kind of role is hired for (QA Automation: reusable UI/API automation and CI; SDET: frameworks,
+    # services, async, performance; lead: strategy, triage, release readiness; manager: coaching, allocation,
+    # metrics; FDE: discovery, prototypes, integrations, deployment troubleshooting; AI QA: evaluations ...)
+    emphasis = [rx for rx, _, _ in scorecard.ROLE_RULES.get(plan.family, [])]
+
+    def stressed(r) -> int:
+        return sum(1 for rx in emphasis if re.search(rf"\b(?:{rx})", r.requirement, re.IGNORECASE))
+    # the posting's main asks first: duties and required work before nice-to-haves; within each, what this kind
+    # of role is hired for, then the posting's own order
+    rows.sort(key=lambda r: (background_line(r), -weight[r.kind], -min(stressed(r), 2), -shown[r.strength],
+                             order[id(r)]))
     lead_owner = next((e.company for e in profile.experience if re.search(r"\blead\b", e.title.lower())), None)
-    if plan.family in ("lead", "data_lead") and lead_owner:   # your test-lead role first for lead jobs
+    if plan.family in ("lead", "data_lead", "manager") and lead_owner:   # your test-lead role first for lead jobs
         rows.sort(key=lambda r: not any(recs[i].owner == lead_owner for i in r.selected_ids if i in recs))
     def item_for(row):
         # the records that show the MOST of this requirement first (then the most relevant overall)
@@ -641,8 +679,13 @@ def _plan_summary_items(profile: Profile, plan) -> tuple[list, set[str]]:
         # framework", "deployment troubleshooting" ~ "investigated ... readiness")
         kinds = [(rec_rx, wt) for ask_rx, rec_rx, wt in _ASK_WORK if re.search(ask_rx, row.requirement, re.IGNORECASE)]
 
-        def overlap(x: str) -> float:      # the most specific kind of the asked work the record shows
-            return max((wt for rx, wt in kinds if re.search(rx, recs[x].text, re.IGNORECASE)), default=0.0)
+        def overlap(x: str) -> float:
+            # how much of the asked kind of work the record shows: "k6 ... load ... latency ... throughput" is
+            # performance work; "integration, business acceptance, performance" only names it once
+            hits = [wt * min(3, len({m.group(0).lower() for m in re.finditer(rf"(?<![\w-])(?:{rx})(?!-)",
+                                                                              recs[x].text, re.IGNORECASE)}))
+                    for rx, wt in kinds]
+            return max(hits, default=0.0)
 
         def relevance(x: str) -> float:    # (without the page-fitting protection bonus of +50)
             v = plan.scores.get(x, 0.0)
@@ -650,24 +693,38 @@ def _plan_summary_items(profile: Profile, plan) -> tuple[list, set[str]]:
         # candidates: the records matched to this ask, and any of yours on this resume that say its own words
         pool = list(dict.fromkeys([i for i in row.selected_ids if i in usable]
                                   + [i for i in ranked if overlap(i) > 0]))
+        # first how much of the ask the record shows (its parts, and the kind of work), then how much it shows
+        # you doing it (built, led, diagnosed, a result)
+        # a record is evidence for this ask only if it shows it: one of the ask's parts, or its kind of work
+        # (when the ask names a kind of work, the record must show THAT work: "generative AI in testing" is not
+        # shown by a record that mentions "test data")
+        pool = [i for i in pool if not _ROUTINE.search(recs[i].text)
+                and scorecard.first_verb(recs[i].text) not in sel._TALK_VERBS]
+        named = [p for p in row.found_parts if p.lower() in _KNOWN_TECH_LOW]
+
+        def tools(x: str) -> int:        # the posting's own tools named in the record ("Azure", "Databricks")
+            return sum(1 for p in named if re.search(rf"(?<![\w-]){re.escape(p)}(?![\w-])", recs[x].text, re.I))
+        doing_it = [i for i in pool if overlap(i) or tools(i)]
+        pool = doing_it if kinds and doing_it else [i for i in pool if shows(i) or overlap(i)]
         fresh = sorted((i for i in pool if i not in used),
                        key=lambda x: (bool(_ROUTINE.search(recs[x].text)),
-                                      -(1.0 * min(shows(x), 1) + doing(x) + 5.0 * overlap(x) + 0.05 * relevance(x)
-                                        - 1.5 * (recs[x].owner in projects))))   # employer work first
+                                      -(4.0 * min(tools(x), 3) + 2.0 * min(shows(x), 3) + 3.0 * overlap(x)
+                                        + 0.6 * doing(x)
+                                        + 0.05 * relevance(x) - 1.5 * (recs[x].owner in projects))))
         if not fresh:
             return None
         picks = [fresh[0]]
-        other = next((i for i in fresh[1:] if recs[i].owner != recs[fresh[0]].owner and (shows(i) or overlap(i))),
-                     None)
-        picks += [other] if other else fresh[1:2]
-        if len(picks) == 1:
-            # one record of its own: pair it with your closest related record, so the sentence summarises two
-            topic = _words(row.requirement) | _words(recs[picks[0]].text)
-            related = max((i for i in ranked if i not in used and i != picks[0]),
-                          key=lambda i: len(_words(recs[i].text) & topic), default=None)
-            if related and len(_words(recs[related].text) & topic) >= 2:
-                picks.append(related)
+        # a second example shows the same ask about as strongly (preferably from another employer); never a record
+        # that only names the topic once ("integration, business acceptance, performance")
+        strong = (lambda i: overlap(i) >= 0.5 * overlap(fresh[0])) if overlap(fresh[0]) else (
+            lambda i: shows(i) >= max(1, shows(fresh[0]) - 1))
+        second = [i for i in fresh[1:] if strong(i)]
+        other = next((i for i in second if recs[i].owner != recs[fresh[0]].owner), None)
+        picks += [other] if other else second[:1]
         used.update(picks)
+        match = "direct" if row.strength == "direct" else "transferable"
+        chosen_log.append({"ask": row.requirement, "kind": row.kind, "match": match, "records": list(picks),
+                           "main": False})
         # the theme: what YOUR records show of the ask, then the ask itself (short), so the sentence answers
         # what the job wants; its claims still come only from the records (checked afterwards)
         ask = " ".join(re.sub(r"^[^:]{3,40}:\s+", "", row.requirement).split()[:14]).rstrip(" .,;")
@@ -676,6 +733,7 @@ def _plan_summary_items(profile: Profile, plan) -> tuple[list, set[str]]:
 
     rest = list(rows)
     covered: set[str] = set()
+    chosen_log: list[dict] = []
 
     def next_ask():
         # the next ask that adds something: an ask whose parts are all said already ("automation" again) is skipped
@@ -702,6 +760,11 @@ def _plan_summary_items(profile: Profile, plan) -> tuple[list, set[str]]:
         if not item:
             break
         items.append(item)
+    for entry in chosen_log:
+        entry["main"] = True
+    # what the screen asks for that your records don't show: kept in the private review, never claimed
+    gaps = [r for r in plan.rows if r.kind in ("required", "responsibility") and r.strength in ("gap", "not shown")
+            and not sel.SOFT.search(r.requirement)][:3]
 
     # client-facing roles: one sentence on working with clients / the business, from your own records
     if plan.family.startswith("fde") or re.search(r"\b(client|customer)", " ".join(r.requirement for r in plan.rows),
@@ -751,6 +814,8 @@ def _plan_summary_items(profile: Profile, plan) -> tuple[list, set[str]]:
         items.append((RESERVE + f"more of your evidence for this job ({rid})",
                       [recs[rid].text] + ([recs[pair].text] if pair else [])))
         reserve += 1
+    plan.priorities = chosen_log + [{"ask": r.requirement, "kind": r.kind, "match": "missing", "records": [],
+                                     "main": False} for r in gaps]
     # one sentence never mixes employment and personal-project work: a project's work said without "In a personal
     # project" reads as done for an employer
     kind_of = {r.text: r.owner_kind for r in profile.experience_bank}
@@ -828,7 +893,7 @@ def _fallback_merge(bullets: list[str], printed: list[str] | None = None) -> str
     norm = lambda t: " ".join(t.lower().rstrip(" .").split())
 
     def head(b: str) -> str:
-        h = _head(b)
+        h = _head(b, max_words=20)          # a whole clause, not "Developed reusable Java automation."
         if norm(h) in whole:              # a short bullet is its own main clause: keep only its core
             h = _head(b, max_words=max(6, len(h.split()) - 4))
         return "" if norm(h) in whole else h
@@ -997,8 +1062,9 @@ def _style_problems(sentence: str, printed: list[str]) -> list[str]:
     return out
 
 
-SUMMARY_SENTENCES = (5, 6)          # who you are + one sentence per main ask of this job (+ a measured result)
-SUMMARY_MIN_LINES = 6               # printed lines at full page width (layout.CHARS_PER_LINE)
+SUMMARY_SENTENCES = (3, 6)          # who you are + one sentence per main ask of this job (+ a measured result)
+SUMMARY_MIN_LINES = 5               # printed lines at full page width (layout.CHARS_PER_LINE): 5-6 lines
+SUMMARY_MAX_LINES = 6.3
 
 
 def summary_lines(text: str) -> float:
@@ -1080,7 +1146,7 @@ def _finish_summary(profile, job, own, items, from_project, use_ai_sentence, ai_
             entry["decision"] = "kept"
         if support is not None:
             support.append(" ".join(chosen))   # what this sentence was built from (for the later check)
-        text = scrub_employers(text, profile)          # experience, not company names
+        text = plain_wording(scrub_employers(text, profile))   # experience, not company names; plain wording
         if name in from_project and "personal project" not in text.lower():
             text = "In a personal project, " + text[0].lower() + text[1:]
         text = text if text.endswith((".", "!", "?")) else text + "."
@@ -1133,7 +1199,8 @@ def _finish_summary(profile, job, own, items, from_project, use_ai_sentence, ai_
         if rest:
             unique.append(rest[0])
     sentences = unique
-    while len(sentences) > SUMMARY_SENTENCES[1]:
+    while len(sentences) > SUMMARY_SENTENCES[1] or (
+            len(sentences) > SUMMARY_SENTENCES[0] and summary_lines(" ".join(sentences)) > SUMMARY_MAX_LINES):
         sentences.pop(-2 if use_ai_sentence else -1)     # keep who you are, the strongest evidence (and the AI line)
     if summary_lines(" ".join(sentences)) < SUMMARY_MIN_LINES:
         notes.append(f"Summary is {summary_lines(' '.join(sentences)):.1f} lines, short of {SUMMARY_MIN_LINES}: "
@@ -1366,16 +1433,23 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
         exp = profile.experience[role_index]
         out = []
         for j, original in enumerate(bullets):
+            sid = source_of.get(original)
             new = reworded.get(f"B{role_index + 1}.{j + 1}", original)
+            # a record of several sentences prints as one bullet: its first sentence (the rest stays in your bank)
+            first = re.split(r"(?<=[.!?])\s+(?=[A-Z])", original.strip(), maxsplit=1)[0]
+            if first != original.strip():
+                new = new if new != original and len(re.split(r"(?<=[.!?])\s+(?=[A-Z])", new.strip())) == 1 else first
+                original = first
             reason = None if new == original else check_rewording(original, new, job)
             use_new = new != original and reason is None
-            if not use_new and plain_wording(original) != original:
-                # an internal job name ("Registered X execution in Jenkins") told as engineering work anyone reads
-                new, use_new, reason = plain_wording(original), True, None
+            if plain_wording(new if use_new else original) != (new if use_new else original):
+                # an internal job name ("Registered X execution in Jenkins") told as engineering work anyone reads,
+                # whether or not the AI reworded the bullet
+                new, use_new, reason = plain_wording(new if use_new else original), True, None
             changed += use_new
             rejected += reason is not None
             out.append(Bullet(text=new if use_new else original, original=original, changed=use_new,
-                              rejected_reason=reason, source_id=source_of.get(original)))
+                              rejected_reason=reason, source_id=sid))
         roles.append(Role(company=exp.company, title=exp.title, location=exp.location,
                           recognition=exp.recognition, start_date=exp.start_date, end_date=exp.end_date,
                           bullets=out, omitted=omitted))
@@ -1500,6 +1574,13 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
         else:
             warnings.append(f"Could not fit on {page_fit['max_pages']} pages "
                             f"(about {page_fit.get('printed_pages') or page_fit['estimated_pages']} pages).")
+    internal = sel.internal_names(profile) if plan is not None else {}
+    # the last read before handing it back: names, titles, dates, placeholders, merged or unfinished text,
+    # duplicates, skills in the wrong line, the strongest evidence near the top, and the export's reading order
+    from app import final_check
+    final = final_check.check_resume(resume, profile, job, plan.priorities if plan is not None else None,
+                                     render=lambda r: render_resume(r, job.title, job.company))
+    warnings += [f"Final check: {p}" for p in final["problems"]]
     lap("final ATS + page check")
     review = {
         "method": METHOD,
@@ -1508,6 +1589,12 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
         "skills_removed_unsupported": removed_skills,
         "summary_checks": summary_checks,
         "core_skills": skills_review,             # per skill: the posting line it answers and the records showing it
+        "final_check": final,                     # what the last read fixed and what it found (app/final_check.py)
+        # the shared evidence selection: the posting's main asks, the match and the records (also the letter's)
+        "priorities": plan.priorities if plan is not None else [],
+        # bullets on this resume that name internal systems a recruiter can't decode: reword them in your bank
+        "internal_names": {b.source_id: names for role in resume.experience for b in role.bullets
+                           if b.source_id and (names := internal.get(b.source_id))},
         "warnings": warnings,
         "notes": notes,
         "questions_for_you": [],

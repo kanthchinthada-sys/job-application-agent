@@ -178,6 +178,17 @@ export interface SearchResult {
   method: string; query: string; country: string; date_from: string; date_to: string;
   results: FoundJob[]; sources: SourceStatus[]; elsewhere?: ElsewhereLink[];
 }
+/** Apify (optional, paid): structured listings from employer career sites, run in the background. */
+export interface ApifySettings {
+  configured: boolean; actor: string; max_results: number; timeout_secs: number; max_cost_usd: number; reuse_minutes: number;
+}
+export interface ApifyRun {
+  id: number; status: string; message: string; actor: string;
+  filters: { title: string; country: string; date_from: string; date_to: string };
+  found: number | null; kept: number; cost_usd: number | null; max_cost_usd: number; max_results: number;
+  timeout_secs: number; started_at: string; finished_at: string | null; active: boolean; results: FoundJob[];
+  reused?: string;
+}
 export interface ApplyResult {
   job_id: number; application_id: number; preparation: string; apply_url: string; new_job: boolean; new_application: boolean; notes: string[];
 }

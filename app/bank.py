@@ -249,8 +249,18 @@ def merge(existing: list[BankRecord], new: list[BankRecord]) -> list[BankRecord]
     return out + list(old.values())
 
 
+# text that is not a record of work: an editor placeholder ("Write something with AI"), a to-do, or too short to
+# say what was done. Such a record is never printed or used as evidence, whatever its status.
+_PLACEHOLDER_TEXT = re.compile(r"^\s*(write something|lorem ipsum|todo\b|tbd\b|placeholder|add (a|an|your) |"
+                               r"describe |enter |type here|new record|untitled)", re.IGNORECASE)
+
+
+def is_placeholder(text: str) -> bool:
+    return bool(_PLACEHOLDER_TEXT.search(text or "")) or len((text or "").split()) < 4
+
+
 def verified(profile: Profile) -> list[BankRecord]:
-    return [r for r in profile.experience_bank if r.status == "verified"]
+    return [r for r in profile.experience_bank if r.status == "verified" and not is_placeholder(r.text)]
 
 
 def bank_profile(profile: Profile) -> Profile:

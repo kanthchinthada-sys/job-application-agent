@@ -124,6 +124,9 @@ class Plan(BaseModel):
     scores: dict[str, float] = {}            # record ID -> how much it matters for this job (for fitting the page)
     family: str = "general"                  # role family read from the posting (scorecard.family)
     why: dict[str, list[str]] = {}           # record ID -> what this role looks for that the bullet shows
+    # the shared evidence selection for the resume summary AND the cover letter (tailoring.evidence_priorities):
+    # [{ask, kind, match: direct | transferable | missing, records: [ids], main: bool}]
+    priorities: list[dict] = []
 
 
 def _in_range(rid: str, spec: str) -> bool:
@@ -293,6 +296,53 @@ _ROUTINE_WORK = re.compile(r"\b(feature branches|commits|merge requests|pull req
                            r"participated|attended)\b", re.IGNORECASE)
 
 
+def internal_names(profile: Profile) -> dict[str, list[str]]:
+    """Record ID -> the internal names in it that a reader outside your team can't decode: capitalised words or
+    acronyms that are not a known tool, one of your skills or an employer, and that appear in at most two of your
+    records ("CIX", "Harvester, Collector, Gateway, OpenDocs"). Names you use often ("Enterprise Imaging") are the
+    product you worked on and count as known."""
+    records = verified(profile)
+    known = {t.lower() for t in KNOWN_TECH} | {x.lower() for x in profile.skills} | {
+        x.lower() for g in profile.skill_groups for x in g.skills}
+    known |= {w.lower() for e in profile.experience for w in re.findall(r"[A-Za-z&]+", e.company)}
+    common = {"api", "apis", "ui", "ci", "cd", "qa", "sql", "etl", "aml", "llm", "ai", "json", "xml", "http", "zip",
+              "pdf", "csv", "rpm", "url", "ha", "p95", "p99", "id", "ids", "uat", "sre", "fhir", "hl7", "gui", "utc",
+              "dsl", "cpu", "crd", "bdd", "tdd", "ragas", "sdk", "cli", "jwt", "sso", "ldap", "dns", "tls", "ssl",
+              "vm", "os", "ram", "gpu", "rest", "sns", "sqs", "gcp", "aws", "tm4j", "sox", "jvm",
+              "greenhouse", "lever", "ashby", "langsmith", "langfuse"}     # public products, not internal names
+    from app.vocabulary import find_terms
+
+    def names(text: str) -> list[str]:
+        covered = [(a, b) for a, b, _ in find_terms(text)]
+        low = text.lower()
+        for t in known:                  # inside a tool or skill name ("REST Assured", "Spring Boot")
+            for m in re.finditer(rf"(?<![\w-]){re.escape(t)}(?![\w-])", low):
+                covered.append((m.start(), m.end()))
+        # a run of two or more capitalised words is a proper name ("Enterprise Imaging", "Legendary Award")
+        for m in re.finditer(r"\b[A-Z][a-z]+(?:\s+(?:of\s+)?[A-Z][a-z]+)+\b", text):
+            covered.append((m.start(), m.end()))
+        found = []
+        for m in re.finditer(r"(?<![\w-])([A-Z][a-z]+[A-Z]\w*|[A-Z]{2,6}|[A-Z][a-z]{3,})(?![\w-])", text):
+            w = m.group(1)
+            if m.start() == 0 or text[:m.start()].rstrip().endswith((".", ":")):
+                continue                # the first word of a sentence
+            if w.lower() in known or w.lower() in common or any(a <= m.start() < b for a, b in covered):
+                continue
+            found.append(w)
+        return found
+    freq: dict[str, int] = {}
+    per = {r.id: names(r.text) for r in records}
+    for ws in per.values():
+        for w in set(ws):
+            freq[w] = freq.get(w, 0) + 1
+    out = {}
+    for rid, ws in per.items():
+        rare = [w for w in dict.fromkeys(ws) if freq[w] <= 2]
+        if len(rare) >= 2 or any(w.isupper() for w in rare):
+            out[rid] = rare
+    return out
+
+
 def plan(profile: Profile, job: JobOut) -> Plan:
     from app import scorecard
     fam = scorecard.family(job.title, job.description)
@@ -378,7 +428,8 @@ def plan(profile: Profile, job: JobOut) -> Plan:
                 b += 1.5 if rank == 0 else 0.75
         return b
 
-    lead_family = fam.name in ("lead", "data_lead")
+    lead_family = fam.name in ("lead", "data_lead", "manager")
+    internal = internal_names(profile)
 
     def action(rid: str) -> float:
         """How much a bullet shows you DOING the work: what you built, led, tested or diagnosed (and a measured
@@ -394,6 +445,8 @@ def plan(profile: Profile, job: JobOut) -> Plan:
             v -= 0.5 if lead_family else 2.5
         if _ROUTINE_WORK.search(r.text):
             v -= 3.0
+        if internal.get(rid):
+            v -= 3.0                   # internal system names a recruiter can't read ("CIX", "Harvester")
         return v
 
     def relevance(rid: str) -> float:
@@ -408,7 +461,7 @@ def plan(profile: Profile, job: JobOut) -> Plan:
         if r.owner_kind == "project":
             return next((MAX_PROJECT[t] for t in role_types[:1] if t in MAX_PROJECT), MAX_PROJECT["default"])
         base = max_per_role[min(order.get(r.owner, 99), len(max_per_role) - 1)]
-        if fam.name in ("lead", "data_lead") and r.owner == lead_role:
+        if fam.name in ("lead", "data_lead", "manager") and r.owner == lead_role:
             base += 2                       # lead roles: your test-lead experience carries more of the story
         return base
 

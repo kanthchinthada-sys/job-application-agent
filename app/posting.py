@@ -84,6 +84,11 @@ def classify_heading(text: str) -> str | None:
 def _is_heading(line: str, next_line: str | None) -> bool:
     if not line or _BULLET.match(line) or next_line is None:
         return False
+    # "And extra credit if you have experience in any of the following!": a long heading that announces a list
+    if line.endswith(("!", ":", "?")) and len(line.split()) <= 16 and re.search(
+            r"\b(any of the following|the following|extra credit|bonus points|nice to have|you'?ll bring)\b",
+            line, re.IGNORECASE):
+        return True
     words = line.rstrip(":").split()
     if len(words) > 12 or len(line) > 90:
         return False
@@ -108,7 +113,7 @@ def sections(description: str) -> list[tuple[str, str, list[str]]]:
             # section ("Nice to have" inside the requirements); otherwise it's a requirement written plainly
             in_section = kind in ("required", "preferred", "duties")
             # ...but a bare one-to-three word line ("Required", "Must have") is always a sub-heading
-            if (k is not None and not line.endswith((":", "?")) and in_section and len(line.split()) > 3
+            if (k is not None and not line.endswith((":", "?", "!")) and in_section and len(line.split()) > 3
                     and (k == kind or len(line.split()) > 6)):
                 out[-1][2].append(_BULLET.sub("", line))
                 continue
@@ -132,7 +137,14 @@ def sections(description: str) -> list[tuple[str, str, list[str]]]:
             out.append((kind, "", []))
             continue
         # "... API testing (tools like Postman are a plus)": only the bracketed tools are optional, not the line
-        if kind == "required" and _INLINE_PREFERRED.search(re.sub(r"\([^)]*\)", "", text)):
+        # "...; Python or TypeScript is a plus": only that clause is optional, the rest of the line is required
+        core = re.sub(r"\([^)]*\)", "", text)
+        core = re.sub(r"[;,]\s*[^;,]*\b(?:is|are|would be) (?:a )?(?:plus|bonus|nice to have)\b.*$", "", core,
+                      flags=re.IGNORECASE)
+        core = re.sub(r"[;,]\s*(?:ideally|preferably)\b.*$", "", core, flags=re.IGNORECASE)   # ", ideally for SaaS"
+        if kind == "required" and len(core.split()) < 4:
+            core = text
+        if kind == "required" and _INLINE_PREFERRED.search(core):
             out.append(("preferred", "(said to be optional)", [text]))
             out.append(("required", "", []))
             continue

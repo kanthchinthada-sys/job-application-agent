@@ -91,7 +91,7 @@ def test_rewrite_rejected_if_it_adds_unsupported_claims(client, fake_llm, app_id
         {"text": "I build pytest suites and cut release time by 64%.", "fact_ids_used": ["F5"]},  # invented number
     ]
     doc = client.post(f"/applications/{app_id}/drafts", json={"kind": "cover_letter"}).json()
-    assert "I am thrilled to apply. I build pytest suites." in doc["content"]
+    assert "I build pytest suites." in doc["content"] and "thrilled" not in doc["content"]
     assert doc["review"]["humanizer"]["rewritten"] is False
     assert doc["review"]["humanizer"]["remaining"][0]["pattern"] == "formulaic opening"
 

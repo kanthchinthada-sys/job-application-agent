@@ -4,7 +4,7 @@ import { firstValueFrom, Observable } from 'rxjs';
 
 import {
   AIMatchReport, AiStatus, Application, BankImportReport, BankRecord, RecordStatus, BoardSearch, Doc, ExtractedSkills, Handoff, Health, ImportedJob, Job, MatchReport,
-  NewJob, QuickAdd, ResumeImport, CountryOption, SearchResult, FoundJob, ApplyResult, Preparation, Me, Requirements,
+  NewJob, QuickAdd, ResumeImport, CountryOption, SearchResult, FoundJob, ApplyResult, ApifyRun, ApifySettings, Preparation, Me, Requirements,
   Activity, IntakeStatus } from './models';
 
 /** An error from the backend, with its readable message (FastAPI's "detail"). */
@@ -75,6 +75,12 @@ export class Api {
     return this.call(this.http.post<SearchResult>('/search', body));
   }
   applyFound(job: FoundJob) { return this.call(this.http.post<ApplyResult>('/search/apply', { job })); }
+  /** Apify: whether it is set up (the token never comes to the browser), its limits, and your latest run. */
+  apifyStatus() { return this.call(this.http.get<{ settings: ApifySettings; latest: ApifyRun | null }>('/search/apify')); }
+  apifyStart(body: { title: string; country: string; date_from: string; date_to: string }) {
+    return this.call(this.http.post<ApifyRun>('/search/apify', body));
+  }
+  apifyRun(id: number) { return this.call(this.http.get<ApifyRun>(`/search/apify/${id}`)); }
 
   applications() { return this.call(this.http.get<Application[]>('/applications')); }
   application(id: number) { return this.call(this.http.get<Application>(`/applications/${id}`)); }

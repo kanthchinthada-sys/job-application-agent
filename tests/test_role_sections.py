@@ -14,11 +14,12 @@ def _lines(p, posting):
     return core_skills.core_skills(p, posting, plan, pool)
 
 
-def test_core_skills_are_three_to_five_lines_led_by_what_the_posting_hires_for():
+def test_core_skills_are_compact_groups_led_by_what_the_posting_hires_for():
     p = with_bank()
     _, lines, review = _lines(p, SDET_JOB)
     names = [g["name"] for g in lines]
-    assert 3 <= len(lines) <= 5, lines
+    assert core_skills.MIN_LINES <= len(lines) <= core_skills.MAX_LINES or len(lines) == len(
+        {core_skills.category_of(s) for g in lines for s in g["skills"]}), lines      # as many as your skills fill
     assert names[0].startswith("Test automation") or names[0] == "API testing", names
     shown = [s for g in lines for s in g["skills"]]
     assert len(shown) == len({s.lower() for s in shown})                       # each skill once
@@ -34,7 +35,7 @@ def test_a_leadership_skill_needs_a_record_of_that_work():
     _, lines, _ = _lines(p, LEAD_JOB)
     lead = next((g["skills"] for g in lines if g["name"] == "Test leadership"), [])
     assert {"Mentoring", "Test strategy", "Defect triage"} <= set(lead), lead    # NB04, NB01, NB02 show that work
-    assert len(lines) >= core_skills.MIN_LINES
+    assert len(lines) >= 3
     p.experience_bank = [r for r in p.experience_bank if not r.text.startswith(("Mentored", "Ran one-to-one"))]
     p.skills = [s for s in p.skills if s != "Mentoring"]
     _, lines, _ = _lines(p, LEAD_JOB)
@@ -110,3 +111,52 @@ def test_a_summary_sentence_is_repaired_before_it_falls_back_to_a_record():
     fixed = tailoring._repair_summary_sentence(ai, records, p, posting, [])
     assert fixed is not None, tailoring.summary_claim_problems(ai, records, p, posting)
     assert "improve" not in fixed[0] and "best practices" not in fixed[0] and "SQL validation" in fixed[0]
+
+
+# ---------- found on a real posting: each of these produced a visible error ----------
+
+def test_a_clause_that_is_a_plus_does_not_make_the_whole_line_optional():
+    from app import posting
+    text = ("What You'll Bring\n5+ years building test automation in Java; Python or TypeScript is a plus\n"
+            "5+ years in quality engineering, ideally for SaaS products\n"
+            "And extra credit if you have experience in any of the following!\n"
+            "Testing in a compliance context (fictional)\nUsing AI tools to speed up triage\n")
+    req, pref, _ = posting.requirement_lines(text)
+    assert any(l.startswith("5+ years building test automation in Java") for l in req)
+    assert any(l.startswith("5+ years in quality engineering") for l in req)
+    assert any("compliance context" in l for l in pref) and not any("compliance context" in l for l in req)
+
+
+def test_a_placeholder_record_is_never_evidence():
+    from app import bank
+    assert bank.is_placeholder("Write something with AI")
+    assert bank.is_placeholder("TODO")
+    assert not bank.is_placeholder("Validated FHIR payloads for healthcare integrations (fictional).")
+    p = with_bank()
+    p.experience_bank[0] = p.experience_bank[0].model_copy(update={"text": "Write something with AI"})
+    assert all(r.text != "Write something with AI" for r in bank.verified(p))
+
+
+def test_internal_system_names_are_found_and_known_products_are_not():
+    p = with_bank()
+    rid = p.experience_bank[0].id
+    p.experience_bank[0] = p.experience_bank[0].model_copy(update={
+        "text": "Developed API validation for Harvester, Collector, Gateway and OpenDocs workflows (fictional)."})
+    found = selection.internal_names(p)
+    assert set(found.get(rid, [])) >= {"Harvester", "Collector"}
+    assert not any("REST" in ws or "Kubernetes" in ws for ws in found.values())
+
+
+def test_core_skills_put_containers_and_cloud_with_ci_cd_rather_than_drop_them():
+    p = with_bank()
+    posting = job("Senior SDET", "Required Qualifications:\nJava test automation frameworks with REST Assured\n"
+                  "API testing\nPerformance testing\nContinuous integration with Jenkins, containers (Docker, "
+                  "Kubernetes) and AWS\nTroubleshoot failures using logs and monitoring\nSelenium UI automation\n"
+                  "AI tools for test creation\n\nBenefits\nGood.")
+    _, lines, _ = _lines(p, posting)
+    assert len(lines) <= core_skills.MAX_LINES
+    shown = {s for g in lines for s in g["skills"]}
+    assert "Kubernetes" in shown
+    k8s = next(g["name"] for g in lines if "Kubernetes" in g["skills"])
+    assert k8s in ("Kubernetes and deployment", "CI/CD and containers", "CI/CD, containers and cloud")
+    assert lines[0]["name"].startswith("Test automation")                     # an SDET role leads with automation

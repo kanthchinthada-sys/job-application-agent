@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, StringConstraints
 
-from app import importers, job_intake, job_search, page_reader, repository
+from app import apify_search, importers, job_intake, job_search, page_reader, repository
 from app.dependencies import get_connection
 from app.errors import ConflictError, NotFoundError
 from app.schemas import ApplicationCreate, JobCreate, StrictModel
@@ -78,6 +78,70 @@ def search(body: SearchRequest, request: Request, conn: Conn):
         row = conn.execute("SELECT id FROM jobs WHERE source_url = ?", (j.url,)).fetchone()
         j.already_added_job_id = row["id"] if row else None
     return result
+
+
+# --- Apify (optional, paid): structured listings from employer career sites, run in the background -----------
+
+def _check_filters(body: SearchRequest) -> str:
+    code = body.country.upper()
+    if code not in job_search.COUNTRIES:
+        raise HTTPException(status_code=422, detail=f"Unknown country {body.country}.")
+    if body.date_from > body.date_to:
+        raise HTTPException(status_code=422, detail="The start date is after the end date.")
+    if (body.date_to - body.date_from).days > 92:
+        raise HTTPException(status_code=422, detail="Choose a date range of at most 3 months.")
+    return code
+
+
+def _apify_request(request: Request):
+    return getattr(request.app.state, "apify_request", None) or apify_search.http
+
+
+def _already_added(conn):
+    def find(url: str):
+        row = conn.execute("SELECT id FROM jobs WHERE source_url = ?", (url,)).fetchone()
+        return row["id"] if row else None
+    return find
+
+
+@router.get("/apify")
+def apify_settings(request: Request, conn: Conn):
+    """Whether Apify is set up, the limits the next run uses, and your latest run (its progress or results).
+    The token is never returned."""
+    latest = apify_search.latest(conn)
+    run = None
+    if latest is not None:
+        try:
+            run = apify_search.refresh(conn, latest, _apify_request(request), _already_added(conn))
+        except apify_search.ApifyError as exc:
+            run = {"id": latest, "status": "ERROR", "message": str(exc), "results": [], "active": False}
+    return {"settings": apify_search.settings(), "latest": run}
+
+
+@router.post("/apify", responses={422: {"description": "Bad filters"}, 503: {"description": "Apify not set up"}})
+def apify_start(body: SearchRequest, request: Request, conn: Conn):
+    """Start a paid Apify search with the same filters as Find jobs (title, country, dates). Returns at once; ask
+    GET /search/apify/{id} for progress. While a run is active, this returns that run instead of starting another."""
+    code = _check_filters(body)
+    if not apify_search.settings()["configured"]:
+        raise HTTPException(status_code=503, detail="Apify is not set up: add APIFY_API_TOKEN to .env and restart "
+                                                    "the app.")
+    try:
+        run = apify_search.start_run(conn, body.title, code, body.date_from, min(body.date_to, date.today()),
+                                     _apify_request(request))
+    except apify_search.ApifyError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return apify_search.refresh(conn, run["id"], _apify_request(request), _already_added(conn)) | {
+        "reused": run.get("reused", "")}
+
+
+@router.get("/apify/{run_id}")
+def apify_progress(run_id: int, request: Request, conn: Conn):
+    """A run's progress; once it has finished, its results (filtered and de-duplicated like Find jobs)."""
+    try:
+        return apify_search.refresh(conn, run_id, _apify_request(request), _already_added(conn))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="No such Apify search in your workspace.") from None
 
 
 @router.post("/apply", response_model=ApplyOut)

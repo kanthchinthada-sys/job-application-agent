@@ -576,7 +576,27 @@ def search(query: str, country_code: str, date_from: date, date_to: date, fetch:
                 statuses.append(SourceStatus(name=name, ok=False, note=f"Not reachable right now: {msg[:160]}"))
 
     start, end = date_from.isoformat(), date_to.isoformat()
+    results, kept_statuses = filter_jobs(found, query, country, start, end)
+    statuses += kept_statuses
+    order = {"JSearch": 0, "Adzuna": 1, "Jooble": 2, "The Muse": 3, "Himalayas": 4, "RemoteOK": 5, "Remotive": 6,
+             "Jobicy": 7, "Arbeitnow": 8, "Company boards": 9}
+    statuses.sort(key=lambda s: (not s.ok, order.get(s.name, 99)))
+    return SearchResult(query=query, country=country.name, date_from=start, date_to=end,
+                        results=results[:MAX_RESULTS], sources=statuses,
+                        elsewhere=elsewhere_links(query, country, (date_to - date_from).days + 1))
+
+
+def job_key(j: FoundJob) -> tuple[str, str]:
+    """Two results are the same job when title and company match (across sources)."""
+    return (re.sub(r"\W+", " ", j.title.lower()).strip(), re.sub(r"\W+", " ", j.company.lower()).strip())
+
+
+def filter_jobs(found: dict[str, list[FoundJob]], query: str, country: Country, start: str,
+                end: str) -> tuple[list[FoundJob], list[SourceStatus]]:
+    """YOUR three filters (title, country, date range) and de-duplication across sources, newest first. Shared by
+    the free sources and the Apify run, so both are judged the same way."""
     kept: dict[tuple[str, str], FoundJob] = {}
+    statuses: list[SourceStatus] = []
     for name, jobs in found.items():
         n_kept = 0
         for j in jobs:
@@ -593,7 +613,7 @@ def search(query: str, country_code: str, date_from: date, date_to: date, fetch:
             if where is None:
                 continue
             j.where, j.title_match = where, level
-            key = (re.sub(r"\W+", " ", j.title.lower()).strip(), re.sub(r"\W+", " ", j.company.lower()).strip())
+            key = job_key(j)
             if key in kept:
                 # keep the version with the most useful details (full description, direct employer link)
                 old = kept[key]
@@ -606,12 +626,7 @@ def search(query: str, country_code: str, date_from: date, date_to: date, fetch:
             n_kept += 1
         statuses.append(SourceStatus(name=name, ok=True, found=len(jobs), kept=n_kept))
     results = sorted(kept.values(), key=lambda j: (j.posted or "", j.title_match == "strong"), reverse=True)
-    order = {"JSearch": 0, "Adzuna": 1, "Jooble": 2, "The Muse": 3, "Himalayas": 4, "RemoteOK": 5, "Remotive": 6,
-             "Jobicy": 7, "Arbeitnow": 8, "Company boards": 9}
-    statuses.sort(key=lambda s: (not s.ok, order.get(s.name, 99)))
-    return SearchResult(query=query, country=country.name, date_from=start, date_to=end,
-                        results=results[:MAX_RESULTS], sources=statuses,
-                        elsewhere=elsewhere_links(query, country, (date_to - date_from).days + 1))
+    return results, statuses
 
 
 def default_range(days: int = 7) -> tuple[date, date]:

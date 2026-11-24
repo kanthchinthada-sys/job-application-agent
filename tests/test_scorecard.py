@@ -116,8 +116,7 @@ def test_without_ai_the_summary_never_repeats_a_bullet(client, fake_llm):
 def test_the_summary_is_framed_for_the_job_and_drops_a_sentence_that_copies_a_bullet(client, fake_llm):
     opening = ("Quality engineer with 9+ years of experience across banking and healthcare (fictional), "
                "focused on test strategy and defect triage.")
-    good = ("Led defect triage and shared release risks with business stakeholders and clients through regular "
-            "updates (fictional).")
+    good = "Ran defect triage for each release and brought the risks it surfaced to business stakeholders (fictional)."
     summary, bullets, review = _lead_resume(client, fake_llm, {"bullets": [], "sentences": [
         {"id": "T1", "text": opening}, {"id": "T3", "text": good}]})        # T3: the defect-triage ask
     assert summary.startswith("Quality engineer with 9+ years") and "focused on test strategy" in summary

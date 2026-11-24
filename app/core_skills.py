@@ -1,11 +1,11 @@
-"""Core Skills for one job: 3-5 short lines a recruiter scans in seconds.
+"""Core Skills for one job: 8-10 compact groups a recruiter scans in seconds, most relevant first.
 
 1. Candidates: every skill you have (your skill lists, per role and project, and tools named in your VERIFIED
    experience records). Nothing is added because the posting names it.
 2. Each skill is weighed by the posting: a skill a required qualification or a listed duty asks for counts most,
    then a preferred one; a skill your records show in actual work counts more than one that is only listed.
 3. Skills go under plain category labels ("API testing", "CI/CD", "Data validation"); each skill once. The
-   categories with the most weight for this job are kept (3-5), strongest first.
+   categories with the most weight for this job are kept (8-10), strongest first.
 4. Ways of working ("align stakeholders", "independently successful") are not skills and are never listed. A
    leadership skill ("test strategy", "mentoring") is listed only when a verified record shows that work.
 
@@ -17,9 +17,9 @@ import re
 from app import evidence as ev
 from app.bank import verified
 
-MIN_LINES, MAX_LINES = 3, 5
+MIN_LINES, MAX_LINES = 8, 10        # compact groups, ordered by relevance to the posting
 MAX_LINE_CHARS = 105            # label + skills on one printed line at full width
-MAX_PER_LINE = 9
+MAX_PER_LINE = 7
 
 # (label, pattern on the skill name). The first category whose pattern matches is the skill's home.
 CATEGORIES: list[tuple[str, str]] = [
@@ -59,7 +59,8 @@ _ASKS = {
     "Performance testing": r"performance|load test|non-functional",
     "CI/CD": r"ci/cd|\bci\b|pipelines?|jenkins|continuous (integration|deployment|delivery)",
     "Test automation": r"test automation|automated test|testing frameworks?|automation frameworks?|"
-                       r"ui test|end-to-end (test|automation)|regression",
+                       r"ui (test|automation)|end-to-end (test|automation)|regression|automate at every layer|"
+                       r"\b(playwright|selenium|cypress)\b",
     "AI testing": r"\bai\b|llm|agentic|ai-enabled|machine learning",
     "Languages": r"programming|languages?|\b(java|python|typescript|javascript|ruby)\b",
     "Web frameworks": r"web applications?|react|rails|frontend|front-end|backend|full[- ]stack",
@@ -80,14 +81,28 @@ _LEAD_EVIDENCE = {
 _CLOSEST = {
     "API testing": ("Test automation",),          # the line is then "Test automation and API testing"
     "Data validation": ("Languages",),            # SQL only: it is a language
+    "Kubernetes and deployment": ("CI/CD",),      # the line is then "CI/CD and containers"
+    "Cloud and messaging": ("CI/CD",),            # AWS / Azure: "CI/CD, containers and cloud"
 }
-_FOLDS = {"API testing": lambda s: _named_tool(s), "Data validation": lambda s: s.lower() == "sql"}
+_FOLDS = {"API testing": lambda s: _named_tool(s), "Data validation": lambda s: s.lower() == "sql",
+          "Kubernetes and deployment": lambda s: s.lower() in ("docker", "kubernetes", "helm"),
+          "Cloud and messaging": lambda s: s.lower() in ("aws", "azure", "gcp")}
 # kinds of testing a posting names, and the tools of yours that do that kind of testing
 _DOES = [
     (r"\bweb\b|\bui\b|browser|end-to-end test|front-?end", ("playwright", "selenium", "cypress", "webdriver")),
     (r"\bapis?\b|backend|web services", ("rest assured", "postman", "pact")),
     (r"databases?|data pipelines?|\betl\b|\belt\b", ("sql",)),
 ]
+
+
+_CASING = {"gcp": "GCP", "aws": "AWS", "artillery": "Artillery", "kafka": "Kafka", "sqs": "SQS", "sns": "SNS",
+           "amazon sns": "Amazon SNS", "sonarqube": "SonarQube", "zephyr": "Zephyr", "jmeter": "JMeter",
+           "gatling": "Gatling", "locust": "Locust", "splunk": "Splunk", "circleci": "CircleCI", "grpc": "gRPC"}
+
+
+def display(skill: str) -> str:
+    """A skill as a resume prints it: "GCP", "Artillery", "SonarQube" (your list may have it in lowercase)."""
+    return _CASING.get(skill.lower(), skill) if skill.islower() else skill
 
 
 def _named_tool(skill: str) -> bool:
@@ -115,6 +130,9 @@ def is_listable(skill: str) -> bool:
         return True                      # test leadership work (still needs a record of it: see core_skills)
     if is_people_skill(skill) or SOFT_PART.search(skill):
         return False
+    if not _named_tool(skill) and re.match(r"(debug|build|write|align|deliver|drive|focus|ensure|use|work|"
+                                           r"collaborate|communicate|own)\b", skill, re.IGNORECASE):
+        return False                     # a verb phrase ("Debug failures"): a duty, not a skill name
     return not (SOFT.search(skill) and category_of(skill) == _LEADERSHIP and not re.search(r"mentor|triage", skill, re.I))
 
 
@@ -173,16 +191,35 @@ def core_skills(profile, job, plan, candidates: list[str], debug: dict | None = 
     for s in sorted(scored.values(), key=lambda s: -s["weight"]):
         by_cat.setdefault(s["category"], []).append(s)
     # how much the posting's duties and qualifications ask for each kind of work (required/duties count most)
-    ask = {label: sum(kind_weight[q.kind] for q in reqs if re.search(rx, q.text, re.IGNORECASE))
-           for label, rx in _ASKS.items()}
+    # (a posting lists what matters most first: within each kind, earlier lines count more)
+    position: dict[int, float] = {}
+    seen_kind: dict[str, int] = {}
+    for n, q in enumerate(reqs):
+        k = seen_kind.get(q.kind, 0)
+        seen_kind[q.kind] = k + 1
+        position[n] = max(0.5, 1.0 - 0.06 * k)
+    ask = {label: sum(kind_weight[q.kind] * position[n] for n, q in enumerate(reqs)
+                      if re.search(rx, q.text, re.IGNORECASE)) for label, rx in _ASKS.items()}
 
     # a category's weight: what the employer hires for first (how much the posting's duties and qualifications ask
     # for that kind of work), then how strong your skills in it are (its 4 strongest, so one long list of minor
     # tools doesn't win)
+    # the kind of role decides which line leads when the posting asks for several things about equally: an SDET
+    # role leads with test automation, a deployment FDE with Kubernetes, a data lead with data validation
+    lead_line = {"sdet": "Test automation", "fde_infra": "Kubernetes and deployment", "lead": _LEADERSHIP,
+                 "data_lead": "Data validation", "fde_app": "Web frameworks"}.get(getattr(plan, "family", ""))
+
     def cat_weight(label: str, items: list[dict]) -> float:
-        return 0.5 * sum(s["weight"] for s in items[:4]) + 0.6 * min(40.0, ask.get(label, 0.0))
+        return (0.5 * sum(s["weight"] for s in items[:4]) + 0.6 * min(40.0, ask.get(label, 0.0))
+                + (6.0 if label == lead_line and ask.get(label, 0.0) >= 3 else 0.0))
     ranked = sorted(by_cat.items(), key=lambda kv: -cat_weight(*kv))
     asked = [kv for kv in ranked if any(s["why"] for s in kv[1]) or ask.get(kv[0], 0) >= 3]
+    # more kinds of work asked for than lines: related lines share one ("CI/CD and containers") before any
+    # asked-for line is dropped
+    for source in ("Cloud and messaging", "Kubernetes and deployment", "API testing", "Data validation"):
+        names = [label for label, _ in asked]
+        if len(asked) > MAX_LINES and source in names and _CLOSEST[source][0] in names:
+            asked = [kv for kv in asked if kv[0] != source]
     keep = asked[:MAX_LINES]
     # the languages a posting requires are always shown (a short line); the weakest other line makes room
     langs = next((kv for kv in asked if kv[0] == "Languages" and any(s["why"] for s in kv[1])), None)
@@ -208,7 +245,7 @@ def core_skills(profile, job, plan, candidates: list[str], debug: dict | None = 
         home = next((h for h in _CLOSEST.get(label, ()) if h in kept), None)
         if home:
             folded.setdefault(home, []).extend(x for x in items[:4] if x["why"] and x["weight"] >= 4.5
-                                               and _FOLDS[label](x["skill"]))
+                                               and x["records"] and _FOLDS[label](x["skill"]))
 
     groups, review = [], []
     # the lines chosen, then (only while fewer than 3 lines have 2+ skills) the next categories your work shows
@@ -233,13 +270,19 @@ def core_skills(profile, job, plan, candidates: list[str], debug: dict | None = 
                 continue                  # a long line only for what the posting asks
             if not s["why"] and s["weight"] < 1.0 and len(line) >= 3:
                 continue                  # only listed, nothing asks for it: room is better left
-            line.append(s["skill"])
+            line.append(display(s["skill"]))
             used += len(s["skill"]) + 2
-            review.append({"line": label, "skill": s["skill"], "why": s["why"] or "shown in your work",
+            review.append({"line": label, "skill": display(s["skill"]), "why": s["why"] or "shown in your work",
                            "records": s["records"]})
         if len(line) >= 2 or (line and label == "Languages"):
-            name = "Test automation and API testing" if label == "Test automation" and any(
-                category_of(x) == "API testing" for x in line) else label
+            homes = {category_of(x) for x in line}
+            name = label
+            if label == "Test automation" and "API testing" in homes:
+                name = "Test automation and API testing"
+            elif label == "CI/CD" and homes & {"Kubernetes and deployment", "Cloud and messaging"}:
+                parts = (["containers"] if "Kubernetes and deployment" in homes else []) + (
+                    ["cloud"] if "Cloud and messaging" in homes else [])
+                name = "CI/CD and " + " and ".join(parts) if len(parts) == 1 else "CI/CD, containers and cloud"
             groups.append({"name": name, "skills": line})
         else:
             review = [r for r in review if r["line"] != label]
