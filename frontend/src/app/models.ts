@@ -62,7 +62,11 @@ export interface Application {
   updated_at?: string;
 }
 
-export interface AiStatus { reachable: boolean; model: string; model_available: boolean; }
+export interface AiStatus { provider?: string; reachable: boolean; model: string; model_available: boolean; error?: string; }
+export interface AiSettings {
+  provider: 'claude' | 'openai' | 'ollama'; model: string | null; has_key: boolean; key_hint: string | null;
+  updated_at: string | null;
+}
 export interface Health { status: string; password_protection: boolean; accounts?: boolean; }
 export interface Me {
   username: string | null; accounts: boolean; local_data_available: boolean;

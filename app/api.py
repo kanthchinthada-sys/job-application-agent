@@ -53,10 +53,13 @@ def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=
     app.state.fetch_page = fetch_page or page_reader.http_get_page   # job web pages (HTML); faked in tests
     app.state.request_api = request_api                # keyed job-search APIs (JSearch, Jooble); faked in tests
     from app.preparation import Preparer
-    app.state.preparer = Preparer(db_path, app.state.llm)   # resume + cover letter in the background
+    from app.llm import AccountLLM
+    # each workspace's AI: Claude or OpenAI with the account's own key (Profile > AI provider), else the local model
+    app.state.account_llms = {db_path: AccountLLM(db_path, app.state.llm)}
+    app.state.preparer = Preparer(db_path, app.state.account_llms[db_path])   # resume + cover letter in the background
     app.state.preparers = {}                                # accounts on: one per workspace (dependencies.preparer)
     from app.intake_runs import IntakeWorker
-    app.state.intake = IntakeWorker(db_path, app.state.llm)  # the model's step after adding a job, in the background
+    app.state.intake = IntakeWorker(db_path, app.state.account_llms[db_path])  # the model's step after adding a job, in the background
     app.state.intake_workers = {}
     app.state.accounts = None
 

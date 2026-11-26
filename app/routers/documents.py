@@ -2,6 +2,7 @@ import sqlite3
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Request
+from app.dependencies import llm as account_llm
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ValidationError
 
@@ -31,7 +32,7 @@ def create_draft(application_id: Id, body: DraftRequest, request: Request, conn:
     Saved as a new version. Read `review.warnings` and `review.questions_for_you` before using it.
     Takes roughly 20-120 seconds on a laptop. Resumes are opened with GET /documents/{id}/print.
     """
-    return make_draft(conn, request.app.state.llm, application_id, body.kind, body.question)
+    return make_draft(conn, account_llm(request), application_id, body.kind, body.question)
 
 
 def make_draft(conn, llm, application_id: int, kind: str, question: str = "", plan=None, job=None,

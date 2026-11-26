@@ -149,7 +149,9 @@ def check_resume(resume, profile, job, priorities: list[dict] | None = None,
         low = text.lower()
         pos, last = [], -1
         for h in _HEADINGS:
-            i = low.find(h.lower())
+            # the heading on a line of its own: "in personal projects" in the summary is not the Projects heading
+            m = re.search(rf"(?m)^\s*{re.escape(h.lower())}\s*$", low)
+            i = m.start() if m else -1
             if i >= 0:
                 if i < last:
                     problems.append(f"In the exported text, \"{h}\" comes out of order.")

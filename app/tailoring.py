@@ -115,6 +115,7 @@ class Bullet(BaseModel):
     changed: bool
     rejected_reason: str | None = None   # why an AI rewording was not used
     source_id: str | None = None         # experience-bank record (internal; never printed)
+    source_ids: list[str] = []           # every record a combined bullet rests on (internal; never printed)
 
 
 class Role(BaseModel):
@@ -516,8 +517,13 @@ def compose_summary(llm: LLMClient, profile: Profile, job: JobOut, selection=Non
                            notes, support, checks)
 
 
-# Keep experience bullets as written by default. The summary is a separate writing task.
-EXACT_LINES = os.environ.get("JOB_AGENT_EXACT_LINES", "on").lower() not in ("0", "off", "false", "no")
+# Claude or OpenAI write the resume from your bank (app/resume_writer.py); the local model keeps every experience
+# bullet exactly as your bank states it (the summary then follows JOB_AGENT_EXACT_SUMMARY).
+_EXACT_ENV = os.environ.get("JOB_AGENT_EXACT_LINES", "").strip().lower()
+# None (default): decided by the account's AI. Claude or OpenAI write the resume from your bank; the local model
+# prints your bank lines exactly (with its own summary). "on": exact lines with any AI. "off": AI wording with any AI.
+EXACT_LINES: bool | None = (True if _EXACT_ENV in ("1", "on", "true", "yes")
+                            else False if _EXACT_ENV in ("0", "off", "false", "no") else None)
 EXACT_SUMMARY = os.environ.get("JOB_AGENT_EXACT_SUMMARY", "off").lower() in ("1", "on", "true", "yes")
 SUMMARY_TARGET_LINES = 6
 SUMMARY_MAX_ITEMS = 8
@@ -1618,10 +1624,13 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
     else:
         selection = select_bullets(profile, job)
 
+    from app.llm import writes_whole_resume
+    cloud = writes_whole_resume(llm)                                # Claude or OpenAI with the account's key
+    exact_lines = EXACT_LINES if EXACT_LINES is not None else not cloud
     lap("job analysis + evidence selection")
     # --- reword selected bullets (one AI call), then verify each one ---
     # Bullets the page fitting will drop anyway are not sent for rewording: less for the model to write.
-    wont_print = _prefit_drops(profile, job, plan, selection, source_of) if plan is not None and not EXACT_LINES else set()
+    wont_print = _prefit_drops(profile, job, plan, selection, source_of) if plan is not None and not exact_lines else set()
     ids: dict[str, str] = {}
     lines = []
     skipped = 0
@@ -1633,7 +1642,7 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
             if j >= 3 and source_of.get(b) in wont_print:
                 skipped += 1
                 continue
-            if not EXACT_LINES and b not in keep_exact:
+            if not exact_lines and b not in keep_exact:
                 hint = _posting_terms_for(b, job)
                 lines.append(f"{bid} ({exp.title} at {exp.company}): {b}"
                              + (f"\n   posting terms this bullet supports: {', '.join(hint)}" if hint else ""))
@@ -1641,13 +1650,25 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
     # ONE AI call writes the whole resume text: every selected bullet, reworded for this job, and the summary
     # sentences (each from 1-2 of your bullets). Code then checks every line against your originals.
     own, items, from_project, use_ai_sentence, ai_sentence = summary_items(profile, job, plan)
-    summary_lines = "\n\n".join(f"T{i + 1} (theme: {name.replace('_', ' ')}):\n- " + "\n- ".join(chosen)
+    summary_block = "\n\n".join(f"T{i + 1} (theme: {name.replace('_', ' ')}):\n- " + "\n- ".join(chosen)
                                  for i, (name, chosen) in enumerate(items) if not name.startswith(RESERVE))
     summary_answers: dict[str, str] = {}
     returned = 0
-    if not EXACT_LINES and (lines or items):
+    writer = None
+    if not exact_lines and plan is not None and cloud:
+        # Claude or OpenAI write the summary and bullets from the bank, every claim checked against its cited
+        # records. The local model keeps the step-by-step path below (one bullet, one summary sentence at a time).
+        from app import resume_writer
+        priorities = [e for e in evidence_priorities(profile, job, plan) if e["records"]][:5]
+        try:
+            writer = resume_writer.write(llm, profile, job, plan, selection, source_of, wont_print, priorities,
+                                         keep_exact)
+        except LLMOutputError as exc:
+            warnings.append(f"The AI's resume text could not be used ({exc}); your own lines are used as written.")
+            exact_lines = True
+    if not exact_lines and writer is None and (lines or items):
         answer = _ask(llm, RESUME_SYSTEM, _job_block(job) + "\n\nBULLETS:\n" + ("\n".join(lines) or "(none)")
-                      + "\n\nSUMMARY ITEMS:\n" + (summary_lines or "(none)"), _ResumeAnswer)
+                      + "\n\nSUMMARY ITEMS:\n" + (summary_block or "(none)"), _ResumeAnswer)
         for b in answer.bullets:
             m = re.search(r"B\d+\.\d+", b.id or "")   # tolerate ids like "B1.2 (Title at Company)"
             if m and m.group(0) in ids:
@@ -1662,6 +1683,14 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
     for role_index, bullets, omitted in selection:
         exp = profile.experience[role_index]
         out = []
+        if writer is not None:
+            for text, ids, original, changed_ in writer["roles"].get(role_index, []):
+                changed += changed_
+                out.append(Bullet(text=text, original=original, changed=changed_, source_id=ids[0], source_ids=ids))
+            roles.append(Role(company=exp.company, title=exp.title, location=exp.location,
+                              recognition=exp.recognition, start_date=exp.start_date, end_date=exp.end_date,
+                              bullets=out, omitted=omitted))
+            continue
         for j, original in enumerate(bullets):
             sid = source_of.get(original)
             new = reworded.get(f"B{role_index + 1}.{j + 1}", original)
@@ -1672,7 +1701,7 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
                 original = first
             reason = None if new == original else check_rewording(original, new, job)
             use_new = new != original and reason is None
-            if not EXACT_LINES and plain_wording(new if use_new else original) != (new if use_new else original):
+            if not exact_lines and plain_wording(new if use_new else original) != (new if use_new else original):
                 # an internal job name ("Registered X execution in Jenkins") told as engineering work anyone reads,
                 # whether or not the AI reworded the bullet
                 new, use_new, reason = plain_wording(new if use_new else original), True, None
@@ -1688,11 +1717,33 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
     facts = build_facts(profile)
     support: list[str] = []
     summary_checks: list[dict] = []       # per sentence: unsupported claims vs style problems, and the decision
-    if EXACT_LINES and EXACT_SUMMARY and plan is not None:
+    if writer is not None:
+        from app import resume_writer
+        # the summary's checks in the review's usual shape: what the AI wrote, why it failed, what happened
+        for c in writer["checks"]:
+            if c.get("part") == "summary":
+                summary_checks.append({"item": "AI writing", "ai_sentence": c["line"], "style": [],
+                                       "unsupported": [{"kind": "check", "detail": p} for p in c["problems"]],
+                                       "records": [{"id": i} for i in c["records"]], "decision": c["action"],
+                                       "sentence": c["now"] or ""})
+        if len(writer["summary"]) >= 3:
+            summary, summary_notes = resume_writer.fit_summary(writer["summary"], writer["reserve"], summary_lines,
+                                                               SUMMARY_MIN_LINES, SUMMARY_MAX_LINES)
+            source, moved = "ai_written", []
+            # where each printed summary sentence comes from (record IDs, for you only)
+            for sentence, ids in writer["sentence_records"].items():
+                if sentence in summary:
+                    summary_checks.append({"item": "AI writing", "sentence": sentence, "decision": "kept",
+                                           "records": [{"id": i} for i in ids], "unsupported": [], "style": []})
+        else:                          # too little of the AI's summary held up: your own summary, reordered
+            summary, source, moved = reorder_summary(profile.summary or "", job), "profile_reordered", []
+            summary_notes = ["The AI's summary did not hold up against your records, so your own summary is used, "
+                             "reordered for this job."]
+    elif exact_lines and EXACT_SUMMARY and plan is not None:
         summary, moved = exact_summary(profile, job, plan, roles)
         source = "bank_exact"
         summary_notes = [f"Summary from your own lines ({', '.join(moved)}): no AI wording."] if moved else []
-    elif EXACT_LINES and not EXACT_SUMMARY:
+    elif exact_lines and not EXACT_SUMMARY:
         summary, source, summary_notes, moved = professional_summary(
             llm, profile, job, items, from_project, own, summary_checks)
         lap("AI writing (professional summary)")
@@ -1716,7 +1767,7 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
     # Check sentence by sentence: a sentence that fails is left out; the rest of the AI's summary is kept.
     sentences = [x for x in re.split(r"(?<=[.!?])\s+", summary.strip()) if x]
     kept, dropped = [], []
-    checked_by_item = EXACT_LINES and (not EXACT_SUMMARY or plan is not None)
+    checked_by_item = writer is not None or (exact_lines and (not EXACT_SUMMARY or plan is not None))
     for i, sentence in enumerate([] if checked_by_item else sentences):
         found = problems(sentence)
         (dropped if found and i > 0 else kept).append(sentence if not found or i == 0 else (sentence, found))
@@ -1738,18 +1789,28 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
     notes = list(summary_notes)          # information, not problems: shown quietly, not as warnings
 
     skills_review: list[dict] = []
+    skills_left_out: list[dict] = []      # skills the AI proposed that your profile doesn't back (review only)
     if plan is not None:
         chosen_skills, chosen_groups = sel.select_skills(profile, job, plan)
     else:
         chosen_skills = order_skills(profile, job)
         chosen_groups = [{"name": g.name, "skills": list(g.skills)} for g in profile.skill_groups]
-    if plan is not None or (EXACT_LINES and not profile.skill_groups):
+    if plan is not None or (exact_lines and not profile.skill_groups):
         from app import core_skills
         pool = (chosen_skills + profile.skills + [s for g in profile.skill_groups for s in g.skills]
                 + [s for e in profile.experience for s in e.skills] + [s for p in profile.projects for s in p.skills])
         lines_skills, lines_groups, skills_review = core_skills.core_skills(profile, job, plan, pool)
         if lines_groups:
             chosen_skills, chosen_groups = lines_skills, lines_groups
+    if writer is not None:
+        if len(writer["skill_lines"]) >= 6:
+            # the AI's Core Skills lines, in the posting's terms, each skill backed by your profile or records
+            chosen_groups = writer["skill_lines"]
+            chosen_skills = [x for g in chosen_groups for x in g["skills"]]
+        else:
+            notes.append("Too few of the AI's Core Skills lines held up, so they are chosen from your skills.")
+        # what the AI wanted to list but your profile doesn't back: for your review, never printed
+        skills_left_out = [{"skill": d["skill"], "line": d["line"], "left_out": d["why"]} for d in writer["skills_dropped"]]
     resume = TailoredResume(
         name=profile.full_name,
         headline=profile.headline,
@@ -1837,6 +1898,7 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
         "skills_removed_unsupported": removed_skills,
         "summary_checks": summary_checks,
         "core_skills": skills_review,             # per skill: the posting line it answers and the records showing it
+        "core_skills_left_out": skills_left_out,  # skills the AI proposed that your profile doesn't back
         "final_check": final,                     # what the last read fixed and what it found (app/final_check.py)
         # the shared evidence selection: the posting's main asks, the match and the records (also the letter's)
         "priorities": plan.priorities if plan is not None else [],
@@ -1860,6 +1922,16 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
             "ai_summary_rejected": {"text": ai_summary, "problems": summary_problems} if source == "profile_reordered" else None,
         },
     }
+    if writer is not None:
+        # how the AI wrote this resume: each printed line with the records it rests on, and every line that failed
+        # its check (repaired, replaced by a faithful version of its record, or left out). For you only.
+        review["writing"] = {
+            "method": "bank_writer_v1",
+            "summary_records": writer["summary_records"],
+            "bullets": [{"company": role.company, "text": b.text, "records": b.source_ids or [b.source_id]}
+                        for role in resume.experience for b in role.bullets],
+            "checks": writer["checks"],
+        }
     review["layout"] = page_fit
     review["line_fit"] = line_fit
     if plan is not None:

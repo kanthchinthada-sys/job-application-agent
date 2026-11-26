@@ -6,7 +6,7 @@ import { Api, ApiError } from '../api';
 
 import { Doc } from '../models';
 
-interface Bullet { text: string; original?: string; changed?: boolean; rejected_reason?: string; source_id?: string | null; }
+interface Bullet { text: string; original?: string; changed?: boolean; rejected_reason?: string; source_id?: string | null; source_ids?: string[]; }
 interface Role { company: string; bullets: Bullet[]; }
 interface TailoredResume { summary: string; summary_source?: string; skills: string[]; experience: Role[]; }
 
@@ -176,7 +176,7 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
       @if (changed().length) {
         <details open><summary>Reworded bullets ({{ changed().length }}): compare with your original</summary>
           @for (c of changed(); track $index) {
-            <div class="small"><span class="muted">{{ c.company }}{{ c.b.source_id ? ' · record ' + c.b.source_id : '' }}</span><br><b>New:</b> {{ c.b.text }}<br>
+            <div class="small"><span class="muted">{{ c.company }}{{ c.b.source_ids?.length ? ' · records ' + c.b.source_ids.join(', ') : c.b.source_id ? ' · record ' + c.b.source_id : '' }}</span><br><b>New:</b> {{ c.b.text }}<br>
               <span class="muted"><b>Original:</b> {{ c.b.original }}</span></div>
           }
         </details>

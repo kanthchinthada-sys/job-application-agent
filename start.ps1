@@ -1,5 +1,6 @@
 # Start the Job Application Agent on Windows (PowerShell):   .\start.ps1
-# Prerequisites: Python 3.12+, Node.js 20+ (to build the screen once), and Ollama (https://ollama.com) for AI features.
+# Prerequisites: Python 3.12+, Node.js 20+ (to build the screen once), and for AI features either your own Claude/OpenAI
+# API key (Profile > AI provider in the app) or Ollama (https://ollama.com) for the free local model.
 # If scripts are blocked:  powershell -ExecutionPolicy Bypass -File .\start.ps1
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -27,7 +28,7 @@ if (-not (Test-Path frontend\dist\frontend\browser\index.html)) {
 }
 
 try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:11434/api/tags | Out-Null }
-catch { Write-Host "Ollama isn't running: the app works, AI features stay off until you start the Ollama app." }
+catch { Write-Host "Ollama isn't running: the app works, accounts without a Claude/OpenAI key have AI off until you start the Ollama app." }
 
 Write-Host ""
 Write-Host "  Job Application Agent:  http://127.0.0.1:$Port/ui/   (Ctrl+C to stop)"

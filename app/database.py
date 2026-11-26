@@ -84,6 +84,16 @@ CREATE TABLE IF NOT EXISTS last_job_search (
     result TEXT NOT NULL
 );
 
+-- This workspace's AI provider: Claude or OpenAI with the account's own API key, else the local Ollama model.
+-- The key is never sent back to the browser.
+CREATE TABLE IF NOT EXISTS ai_settings (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    provider   TEXT NOT NULL,          -- claude | openai | ollama
+    api_key    TEXT,
+    model      TEXT,
+    updated_at TEXT NOT NULL
+);
+
 -- Append-only history: every status change is recorded with its timestamp.
 CREATE TABLE IF NOT EXISTS application_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -576,7 +576,9 @@ def draft(llm: LLMClient, profile: Profile, job: JobOut, kind: Kind, question: s
     if kind == "cover_letter" and not legacy:
         from app import cover_letter
         cards = cover_letter.story_cards(profile, job, facts, priorities)
-        prompt = user.rsplit("\n\nTASK\n", 1)[0] + cover_letter.prompt(cards)
+        from app.llm import writes_whole_resume
+        cloud = writes_whole_resume(llm)                                # Claude or OpenAI with the account's key
+        prompt = user.rsplit("\n\nTASK\n", 1)[0] + cover_letter.prompt(cards, cloud)
         raw = metrics.call(llm, "cover letter prose", SYSTEM_PROMPT, prompt,
                            cover_letter.StoryDraft.model_json_schema())
         if isinstance(raw, dict) and "examples" in raw:
@@ -585,7 +587,7 @@ def draft(llm: LLMClient, profile: Profile, job: JobOut, kind: Kind, question: s
             except ValidationError:
                 structured = cover_letter.StoryDraft(examples=[])
             lap("AI writing")
-            return cover_letter.assemble(structured, cards, profile, job)
+            return cover_letter.assemble(structured, cards, profile, job, cloud)
         # Older clients returned one text field. Continue to check and repair it.
         answer = _validate_draft(raw)
     else:

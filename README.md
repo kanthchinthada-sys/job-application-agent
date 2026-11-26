@@ -5,14 +5,16 @@ by title, country and date, and for each one get a **resume tailored to that job
 **cover letter**, and an **ATS keyword check**. Everything it writes is checked against your real experience: it
 never invents qualifications, and it never submits an application for you.
 
-Runs locally and free: FastAPI + SQLite + an Angular screen + an optional local AI model through
-[Ollama](https://ollama.com). No accounts, no cloud, no API costs. Your data stays in `data/` on your computer.
+Runs locally: FastAPI + SQLite + an Angular screen. The AI is your choice per account: **Claude** or **OpenAI**
+with your own API key (Profile > AI provider; faster and better writing, billed by the provider per use), or the
+free local model through [Ollama](https://ollama.com). Your data stays in `data/` on your computer.
 
 Architecture: [docs/architecture.md](docs/architecture.md).
 
 ## Quick start
 
-Prerequisites: **Python 3.12+**, **Node.js 20+** (builds the screen once) and, for AI features,
+Prerequisites: **Python 3.12+**, **Node.js 20+** (builds the screen once) and an AI for the writing: either your
+own **Claude** or **OpenAI** API key (added in the app, see below), or the free local model through
 [Ollama](https://ollama.com) with `ollama pull qwen3:8b`. Then one command:
 
 | Platform | Command (in the project folder) |
@@ -23,6 +25,14 @@ Prerequisites: **Python 3.12+**, **Node.js 20+** (builds the screen once) and, f
 The first run installs everything; later runs start in seconds. It prints the address to open:
 **<http://127.0.0.1:8000/ui/>**. Signed out, you see **Sign in** and **Create account**; a new account lands on a
 short profile setup (upload a resume or paste your experience).
+
+**Choose your AI (per account):** open **Profile → AI provider**, pick Claude or OpenAI and paste your own API key
+(from [console.anthropic.com](https://console.anthropic.com) or
+[platform.openai.com](https://platform.openai.com/api-keys); a chat subscription such as Claude Pro or ChatGPT Plus
+can't be used). The key is checked with the provider before it is saved, stays on your computer, and use is billed
+to your provider account. Without a key, the account uses the local Ollama model. Claude and OpenAI write the
+resume summary, Core Skills and bullets from your experience bank and a story-style cover letter, every line checked
+against your records; the local model prints your bank lines exactly as written.
 
 Manual start, any system:
 
@@ -149,7 +159,8 @@ one being down never stops the others, and the results say which sources answere
 ### Your data and privacy
 
 * Your profile, jobs and applications live in `data/job_agent.db` on your computer (git-ignored).
-* The AI runs locally (Ollama); nothing is sent to an AI service. Contact details are never put into AI prompts.
+* With the local model (Ollama), nothing is sent to an AI service. With Claude or OpenAI, each step sends the job posting and the parts of your profile it needs to that provider, under your own API key. Contact details are never put into AI prompts.
+* Each account's API key is stored in that account's own workspace database on this server and is never sent back to the browser (only its last 4 characters are shown).
 * Job searches send only the job title, country and date to the job sources.
 * `.env` (settings, keys, optional password) is git-ignored.
 

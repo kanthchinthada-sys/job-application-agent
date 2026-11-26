@@ -3,6 +3,7 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from app.dependencies import llm as account_llm
 from pydantic import BaseModel, StringConstraints
 
 from app import apify_search, importers, job_intake, job_search, page_reader, repository
@@ -221,7 +222,7 @@ def apply(body: ApplyRequest, request: Request, conn: Conn):
         if len(description.strip()) < 20:
             description = f"{title} at {company} ({location}). Full description: {url}"
         # title and company come from the search result: the model is asked only if the skills are thin
-        info = job_intake.intake(description, url, request.app.state.llm, known_title=title,
+        info = job_intake.intake(description, url, account_llm(request), known_title=title,
                                  known={"company": (company, "job search")} if company else None)
         notes += [n for n in info.notes if "No job title" not in n and "No company" not in n]
         try:

@@ -3,3 +3,5 @@ fastapi==0.162.7
 uvicorn==0.54.0
 httpx==0.28.1
 pypdf==6.17.0      # reads PDF resumes on the Profile page (Word and text files need nothing extra)
+anthropic==2.14.0  # Claude, with each account's own API key (Profile > AI provider)
+openai==3.59.0     # OpenAI, with each account's own API key (Profile > AI provider)

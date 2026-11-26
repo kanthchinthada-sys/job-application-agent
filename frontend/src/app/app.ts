@@ -24,7 +24,7 @@ export class App implements OnInit {
   private api = inject(Api);
   private goToLogin = inject(GO_TO_LOGIN);
 
-  protected readonly ai = signal<{ ok: boolean; model: string; reachable: boolean; available: boolean } | null>(null);
+  protected readonly ai = signal<{ ok: boolean; model: string; reachable: boolean; available: boolean; provider: string; error?: string } | null>(null);
   protected readonly aiText = signal('Checking AI…');
   protected readonly me = signal<Me | null>(null);
   protected readonly username = signal<string | null>(null);
@@ -38,13 +38,20 @@ export class App implements OnInit {
     await this.checkAi();
   }
 
+  constructor() {
+    try { window.addEventListener('ai-provider-changed', () => this.checkAi()); } catch { /* no window */ }
+  }
+
   async checkAi() {
     this.aiText.set('Checking AI…');
     try {
       const s = await this.api.aiStatus();
       const ok = s.reachable && s.model_available;
-      this.ai.set({ ok, model: s.model, reachable: s.reachable, available: s.model_available });
-      this.aiText.set(ok ? 'AI ready' : s.reachable ? 'AI: model missing' : 'AI offline');
+      const provider = s.provider || 'ollama';
+      this.ai.set({ ok, model: s.model, reachable: s.reachable, available: s.model_available, provider, error: s.error });
+      const name = provider === 'claude' ? 'Claude' : provider === 'openai' ? 'OpenAI' : '';
+      this.aiText.set(ok ? (name ? `AI: ${name}` : 'AI ready')
+        : name ? `AI: ${name} not working` : s.reachable ? 'AI: model missing' : 'AI offline');
     } catch {
       this.ai.set(null);
       this.aiText.set('AI status unknown');
@@ -54,6 +61,10 @@ export class App implements OnInit {
   protected aiDetail(): string {
     const a = this.ai();
     if (!a) return 'unknown';
+    if (a.provider === 'claude' || a.provider === 'openai') {
+      const name = a.provider === 'claude' ? 'Claude' : 'OpenAI';
+      return a.ok ? `${name} (${a.model}) with your API key` : `${name}: ${a.error || 'not reachable'} (Profile > AI provider)`;
+    }
     return a.ok ? 'running on this computer' : a.reachable ? `Ollama is running, but ${a.model} isn't downloaded`
       : 'Ollama is not reachable';
   }

@@ -30,7 +30,7 @@ from app import ats
 from app.schemas import JobOut, Profile
 
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
-NUMBER_WORDS = re.compile(r"\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|"
+NUMBER_WORDS = re.compile(r"\b(one(?!\s+(?:place|way|another|of|or|at\s+a\s+time|view|go)\b)|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|"
                           r"thirty|forty|fifty|hundreds?|thousands?|millions?|dozens?|twice|double|triple|half)\b",
                           re.IGNORECASE)
 LEADERSHIP = re.compile(r"\b(led|leads?|leading|manag(?:ed|es|ing)|mentor(?:ed|ing|s)?|coach(?:ed|es|ing)|"

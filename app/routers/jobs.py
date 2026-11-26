@@ -2,6 +2,7 @@ import sqlite3
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Request
+from app.dependencies import llm as account_llm
 
 from pydantic import BaseModel
 
@@ -106,7 +107,7 @@ def quick_add(body: JobQuickAdd, request: Request, conn: Conn):
                                                     f"({'.'.join(map(str, exc.errors()[0]['loc']))}).") from exc
     job = repository.create_job(conn, new)
     if info.missing:
-        if body.use_ai and request.app.state.llm is not None:
+        if body.use_ai and account_llm(request) is not None:
             info.ai_state = "pending"
             intake_worker(request).start(conn, job.id, info, description, url)
         else:
@@ -146,7 +147,7 @@ def update_job(job_id: JobId, body: JobUpdate, request: Request, conn: Conn):
     if "description" in changes and "required_skills" not in changes:
         job = repository.get_job(conn, job_id)
         info = job_intake.intake(changes["description"], job.source_url and str(job.source_url),
-                                 request.app.state.llm, known_title=changes.get("title", job.title))
+                                 account_llm(request), known_title=changes.get("title", job.title))
         changes["required_skills"], changes["preferred_skills"] = info.required_skills, info.preferred_skills
     return repository.update_job(conn, job_id, changes)
 
@@ -173,7 +174,7 @@ def refresh_job(job_id: JobId, request: Request, conn: Conn):
     if not description or len(description) <= len(job.description):
         raise ConflictError("The full posting couldn't be read from its page. Open the posting, copy the "
                             "description and paste it instead.")
-    info = job_intake.intake(description, url, request.app.state.llm, known_title=job.title)
+    info = job_intake.intake(description, url, account_llm(request), known_title=job.title)
     return repository.update_job(conn, job_id, {"description": description, "required_skills": info.required_skills,
                                                 "preferred_skills": info.preferred_skills})
 
@@ -225,7 +226,7 @@ def ai_second_look(job_id: JobId, conn: Conn, request: Request):
     profile = repository.get_profile(conn)
     missing = (matching.compare_skills(profile, job.required_skills).missing
                + matching.compare_skills(profile, job.preferred_skills).missing)
-    return ai_match.second_look(request.app.state.llm, profile, missing)
+    return ai_match.second_look(account_llm(request), profile, missing)
 
 
 def _same_description(conn, description: str):

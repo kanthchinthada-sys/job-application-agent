@@ -3,7 +3,7 @@ import { Injectable, inject } from '@angular/core';
 import { firstValueFrom, Observable } from 'rxjs';
 
 import {
-  AIMatchReport, AiStatus, Application, BankImportReport, BankRecord, RecordStatus, BoardSearch, Doc, ExtractedSkills, Handoff, Health, ImportedJob, Job, MatchReport,
+  AIMatchReport, AiSettings, AiStatus, Application, BankImportReport, BankRecord, RecordStatus, BoardSearch, Doc, ExtractedSkills, Handoff, Health, ImportedJob, Job, MatchReport,
   NewJob, QuickAdd, ResumeImport, CountryOption, SearchResult, FoundJob, ApplyResult, ApifyRun, ApifySettings, Preparation, Me, Requirements,
   Activity, IntakeStatus } from './models';
 
@@ -41,6 +41,10 @@ export class Api {
 
   health() { return this.call(this.http.get<Health>('/health')); }
   aiStatus() { return this.call(this.http.get<AiStatus>('/ai/status')); }
+  aiSettings() { return this.call(this.http.get<AiSettings>('/ai/settings')); }
+  saveAiSettings(body: { provider: string; api_key?: string | null; model?: string | null }) {
+    return this.call(this.http.put<AiSettings>('/ai/settings', body));
+  }
   logout() { return this.call(this.http.post('/logout', {})); }
   me() { return this.call(this.http.get<Me>('/auth/me')); }
   claimLocalData(setupCode: string) {

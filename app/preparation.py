@@ -30,8 +30,11 @@ class _OneAtATime:
     the resume's call has begun, so the letter's call queues right behind it instead of in front of it."""
 
     def __init__(self, llm, parallel: int = 1):
+        from app.llm import writes_whole_resume
         self._llm, self.model = llm, getattr(llm, "model", "")
-        self._slots = threading.Semaphore(max(1, parallel))
+        # Claude or OpenAI: the resume and the letter are written at the same time; the local model, one at a time
+        self.writes_whole_resume = writes_whole_resume(llm)
+        self._slots = threading.Semaphore(max(2 if self.writes_whole_resume else 1, parallel))
         self.started = threading.Event()
 
     def generate_json(self, system: str, user: str, schema: dict) -> dict:

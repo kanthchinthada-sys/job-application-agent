@@ -1,6 +1,7 @@
 #!/bin/bash
 # Start the Job Application Agent on macOS or Linux:   ./start.sh
-# Prerequisites: Python 3.12+, Node.js 20+ (to build the screen once), and Ollama (https://ollama.com) for AI features.
+# Prerequisites: Python 3.12+, Node.js 20+ (to build the screen once), and for AI features either your own Claude/OpenAI
+# API key (Profile > AI provider in the app) or Ollama (https://ollama.com) for the free local model.
 # The first run installs everything; later runs start in seconds. Stop with Ctrl+C.
 set -e
 cd "$(dirname "$0")"
@@ -29,7 +30,7 @@ fi
 
 if ! curl -s -o /dev/null "http://127.0.0.1:11434/api/tags"; then
   (command -v open >/dev/null && open -a Ollama 2>/dev/null) || (command -v ollama >/dev/null && (ollama serve >/dev/null 2>&1 &)) \
-    || echo "Ollama isn't running: the app works, AI features stay off until you start it (https://ollama.com)."
+    || echo "Ollama isn't running: the app works, accounts without a Claude/OpenAI key have AI off until you start it (https://ollama.com)."
 fi
 
 echo ""

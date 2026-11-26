@@ -6,6 +6,7 @@ import { Api, ApiError } from '../api';
 import { ResumeImport } from '../models';
 import { Msg, MsgBox } from '../ui';
 import { BankPanel } from './bank-panel';
+import { AiProviderPanel } from './ai-provider-panel';
 
 /**
  * Your profile. New users start here: upload a resume, check what was read, save. Everything comes from your own
@@ -13,7 +14,7 @@ import { BankPanel } from './bank-panel';
  */
 @Component({
   selector: 'app-profile-page',
-  imports: [FormsModule, MsgBox, BankPanel],
+  imports: [FormsModule, MsgBox, BankPanel, AiProviderPanel],
   template: `
     <div class="card" data-testid="resume-upload">
       @if (setup() && !hasProfile()) {
@@ -119,6 +120,7 @@ import { BankPanel } from './bank-panel';
       </div>
     }
     @if (!setup()) {
+    <app-ai-provider-panel />
     <app-bank-panel />
 
     <div class="card">
