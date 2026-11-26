@@ -194,25 +194,29 @@ def sync(conn: sqlite3.Connection, job) -> None:
 
 
 def list_suggestions(conn, job_id: int | None = None) -> list[dict]:
+    _columns(conn)
     sql = """SELECT s.*, j.title AS job_title, j.company AS job_company FROM gap_suggestions s
              JOIN jobs j ON j.id=s.job_id WHERE s.state='pending'"""
     where = " AND s.job_id=?" if job_id is not None else ""
     return [dict(row) for row in conn.execute(sql + where + " ORDER BY s.id DESC", () if job_id is None else (job_id,))]
 
 
-def confirm(conn, suggestion_id: int, owner_name: str, text: str) -> tuple[str, int]:
+def confirm(conn, suggestion_id: int, owner_name: str, text: str, in_transaction: bool = False) -> tuple[str, int]:
+    """Add one confirmed line to the bank and ask for a new resume for its job. in_transaction: part of
+    confirm_many, which opens and commits one transaction for all of them."""
     from app import repository
     from app.errors import ConflictError, NotFoundError
     from app.schemas import ApplicationCreate, BankRecord, Profile
 
-    conn.execute("BEGIN IMMEDIATE")
+    if not in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     try:
         row = conn.execute("SELECT * FROM gap_suggestions WHERE id=?", (suggestion_id,)).fetchone()
         if not row:
             raise NotFoundError("That technical gap is no longer on your review list.")
         app_row = conn.execute("SELECT id FROM applications WHERE job_id=?", (row["job_id"],)).fetchone()
         if row["state"] == "approved" and app_row:
-            conn.commit()
+            in_transaction or conn.commit()
             return row["record_id"], app_row["id"]
         if row["state"] != "pending":
             raise ConflictError("That technical gap has already been dismissed.")
@@ -249,8 +253,160 @@ def confirm(conn, suggestion_id: int, owner_name: str, text: str) -> tuple[str, 
         conn.execute("UPDATE gap_suggestions SET state='approved', record_id=? WHERE id=?", (rid, suggestion_id))
         conn.execute("DELETE FROM gap_suggestions WHERE skill=? COLLATE NOCASE AND state='pending'", (skill,))
         conn.execute("INSERT OR IGNORE INTO resume_refresh_requests (application_id) VALUES (?)", (aid,))
-        conn.commit()
+        in_transaction or conn.commit()
         return rid, aid
+    except Exception:
+        if not in_transaction:
+            conn.rollback()
+        raise
+
+
+def confirm_many(conn, items: list[tuple[int, str, str]]) -> tuple[list[str], list[int]]:
+    """Add several confirmed lines at once (all or none), so each job's resume is written once for all of them."""
+    from app.errors import ConflictError
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        records, apps = [], []
+        for suggestion_id, owner_name, text in items:
+            skill = (conn.execute("SELECT skill FROM gap_suggestions WHERE id=?", (suggestion_id,)).fetchone()
+                     or {"skill": "this skill"})["skill"]
+            try:
+                rid, aid = confirm(conn, suggestion_id, owner_name, text, in_transaction=True)
+            except ConflictError as exc:
+                raise ConflictError(f"{skill}: {exc}") from exc
+            records.append(rid)
+            if aid not in apps:
+                apps.append(aid)
+        conn.commit()
+        return records, apps
     except Exception:
         conn.rollback()
         raise
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# AI drafts: instead of asking you to write the line, the AI writes one, set at the employer or project where the
+# skill most plausibly fits, built on what your records there already show. It only joins your bank (and reaches a
+# resume) after you confirm it is true.
+
+_DRAFT_SYSTEM = """You help a job seeker add one line to their experience bank for a skill a job posting asks for.
+Write ONE resume bullet, set in the candidate's real work at the employer or project where this skill most plausibly
+fits, building on the systems, tools and domain that employer's records already show.
+Rules:
+- Name the skill exactly as given, once.
+- One sentence, past tense, starts with a strong action verb, 16-28 words, no first person.
+- No numbers, percentages, team sizes, awards, certifications, or leadership claims (led, managed, mentored, owned).
+- Stay modest and concrete: the kind of work someone in that role there could really have done. The candidate will
+  confirm it is true before it is used.
+- owner must be exactly one of the listed names; based_on lists the record IDs the bullet builds on.
+- why: one short sentence saying why this employer or project fits."""
+
+_DRAFT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "owner": {"type": "string"},
+        "text": {"type": "string"},
+        "based_on": {"type": "array", "items": {"type": "string"}},
+        "why": {"type": "string"},
+    },
+    "required": ["owner", "text", "based_on", "why"],
+}
+
+
+def _columns(conn: sqlite3.Connection) -> None:
+    have = {row[1] for row in conn.execute("PRAGMA table_info(gap_suggestions)")}
+    for column in ("draft_owner", "draft_text", "draft_note"):
+        if column not in have:
+            conn.execute(f"ALTER TABLE gap_suggestions ADD COLUMN {column} TEXT")
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9+#.]+", evidence.normalize(text.casefold())) if len(w) > 2}
+
+
+def _candidates(profile, job, row) -> list[dict]:
+    """Your employers and projects, most relevant to this skill first, each with its closest records."""
+    focus = _words(f"{row['skill']} {row['requirement']} {job.title}")
+    category = core_skills.category_of(row["skill"])
+    owners: dict[str, dict] = {}
+    for e in profile.experience:
+        owners.setdefault(e.company, {"name": e.company, "kind": "experience", "role": e.title,
+                                      "dates": f"{e.start_date} to {e.end_date or 'present'}", "lines": []})
+        owners[e.company]["lines"] += [(None, h) for h in e.highlights]
+    for p in profile.projects:
+        owners.setdefault(p.name, {"name": p.name, "kind": "project", "role": "personal project", "dates": "",
+                                   "lines": [(None, p.description)]})
+        owners[p.name]["lines"] += [(None, h) for h in p.highlights]
+    for r in profile.experience_bank:
+        if r.status == "verified" and r.owner in owners and not r.caveat:
+            owners[r.owner]["lines"].append((r.id, r.text))
+    ranked = []
+    for o in owners.values():
+        def score(line):
+            words = _words(line)
+            same_area = category and any(core_skills.category_of(t) == category for _, _, t in find_terms(line))
+            return len(words & focus) + (3 if same_area else 0)
+        lines = sorted({t: (rid, t) for rid, t in o["lines"]}.values(), key=lambda x: -score(x[1]))
+        o["lines"] = lines[:6]
+        o["score"] = sum(score(t) for _, t in lines[:3]) + (5 if o["name"] == row["owner_hint"] else 0)
+        ranked.append(o)
+    ranked.sort(key=lambda o: -o["score"])
+    return ranked[:4]
+
+
+def _draft_problems(text: str, skill: str, label: str) -> list[str]:
+    from app import claims
+    problems = []
+    hit = evidence.find_part(_key(skill), [("draft", text)])
+    if hit is None or hit.related:
+        problems.append(f"It must name {label}.")
+    if claims._NUMBER.search(text) or claims.NUMBER_WORDS.search(text):
+        problems.append("It must not contain numbers or amounts.")
+    if claims.LEADERSHIP.search(text):
+        problems.append("It must not claim leadership (led, managed, mentored).")
+    if "[" in text or "]" in text:
+        problems.append("It must be a finished sentence with no placeholders.")
+    if not 12 <= len(text.split()) <= 30:
+        problems.append(f"It must be 16-28 words (it has {len(text.split())}).")
+    return problems
+
+
+def draft(conn: sqlite3.Connection, llm, suggestion_id: int, again: bool = False) -> dict:
+    """The AI's line for this gap (written once and kept; again=True writes a new one)."""
+    from app import metrics, repository
+    from app.errors import NotFoundError
+    from app.llm import LLMOutputError
+    _columns(conn)
+    row = conn.execute("SELECT * FROM gap_suggestions WHERE id=? AND state='pending'", (suggestion_id,)).fetchone()
+    if not row:
+        raise NotFoundError("That technical gap is no longer on your review list.")
+    if row["draft_text"] and not again:
+        return dict(row)
+    job = repository.get_job(conn, row["job_id"])
+    profile = repository.get_profile(conn)
+    candidates = _candidates(profile, job, row)
+    if not candidates:
+        raise LLMOutputError("Add an employer or project to your profile first.")
+    label = _label(_key(row["skill"]), job, row["requirement"], heading=False)    # as the posting writes it
+    blocks = []
+    for o in candidates:
+        lines = "\n".join(f"  - {f'[{rid}] ' if rid else ''}{text}" for rid, text in o["lines"])
+        blocks.append(f"{o['name']} ({o['kind']}; {o['role']}{'; ' + o['dates'] if o['dates'] else ''}):\n{lines}")
+    prompt = (f"JOB: {job.title} at {job.company}\nTHE POSTING ASKS FOR: {row['requirement']}\nSKILL: {label}\n\n"
+              "WHERE THE CANDIDATE WORKED (most relevant first), with what their records say they did:\n\n"
+              + "\n\n".join(blocks))
+    names = {o["name"].casefold(): o["name"] for o in candidates}
+    note = ""
+    for _ in range(2):
+        answer = metrics.call(llm, "technical gap draft", _DRAFT_SYSTEM, prompt + note, _DRAFT_SCHEMA)
+        text = " ".join(str(answer.get("text") or "").split()).strip()
+        owner = names.get(str(answer.get("owner") or "").casefold().strip(), candidates[0]["name"])
+        problems = _draft_problems(text, row["skill"], label)
+        if not problems:
+            why = " ".join(str(answer.get("why") or "").split())[:300]
+            conn.execute("UPDATE gap_suggestions SET draft_owner=?, draft_text=?, draft_note=? WHERE id=?",
+                         (owner, text, why or None, suggestion_id))
+            conn.commit()
+            return dict(conn.execute("SELECT * FROM gap_suggestions WHERE id=?", (suggestion_id,)).fetchone())
+        note = f"\n\nYOUR LAST ANSWER: {text}\nFIX: {' '.join(problems)}"
+    raise LLMOutputError(f"The AI could not write a usable line for {label}. Try again, or write it yourself.")

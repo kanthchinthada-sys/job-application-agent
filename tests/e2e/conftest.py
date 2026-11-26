@@ -60,6 +60,10 @@ class E2EFakeLLM:
         if "company" in props and self.intake_gate is not None:
             self.intake_gate.wait(20)
             return self.intake_answer or {}
+        if {"based_on", "why"} <= props.keys():      # a technical gap's line, written at the best-fitting employer
+            return {"owner": "Example Corp (fictional)", "based_on": [], "why": "Checkout testing happened there.",
+                    "text": "Built Cypress tests for the checkout flow, checking form validation errors and payment "
+                            "confirmation pages before each release."}
         if "bullets" in props:
             return {"bullets": []}
         if "sentences" in props:

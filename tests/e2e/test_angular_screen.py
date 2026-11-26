@@ -389,12 +389,12 @@ def test_technical_gap_review_generates_a_new_resume(ui: Page):
     assert initial.ok
     ui.goto(f"/ui/#/applications/{aid}?tab=match")
     panel = ui.get_by_test_id("gap-review")
-    expect(panel).to_contain_text("cypress")
-    expect(panel.get_by_role("button", name="Review example")).to_have_count(1)
-    panel.get_by_role("button", name="Review example").click()
-    panel.get_by_label("Employer or project").select_option(label="Example Corp (fictional)")
-    panel.get_by_role("textbox").fill("Built Cypress tests for the checkout flow and checked validation errors.")
-    enable = panel.get_by_role("button", name="Enable and generate resume")
+    expect(panel).to_contain_text("Cypress")
+    # the AI writes the line at the best-fitting employer; nothing to type
+    expect(panel.get_by_role("textbox")).to_have_value(re.compile(r"^Built Cypress tests for the checkout flow"))
+    expect(panel.get_by_label("Employer or project")).to_have_value("Example Corp (fictional)")
+    expect(panel).to_contain_text("Why here: Checkout testing happened there.")
+    enable = panel.get_by_test_id("gap-add-all").get_by_role("button")
     expect(enable).to_be_disabled()
     panel.get_by_role("checkbox").check()
     enable.click()

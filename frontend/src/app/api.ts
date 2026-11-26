@@ -168,9 +168,17 @@ export class Api {
     const params: Record<string, string> = jobId === undefined ? {} : { job_id: String(jobId) };
     return this.call(this.http.get<GapSuggestion[]>('/experience-gaps', { params }));
   }
+  draftGap(id: number, again = false) {
+    return this.call(this.http.post<GapSuggestion>(`/experience-gaps/${id}/draft`, {},
+      { params: again ? { again: 'true' } : {} }));
+  }
   confirmGap(id: number, owner: string, text: string) {
     return this.call(this.http.post<{ record_id: string; application_id: number; preparation: Preparation }>(
       `/experience-gaps/${id}/confirm`, { owner, text, confirmed: true }));
+  }
+  confirmGaps(items: { id: number; owner: string; text: string }[]) {
+    return this.call(this.http.post<{ record_ids: string[]; application_ids: number[]; preparations: Preparation[] }>(
+      '/experience-gaps/confirm', { items, confirmed: true }));
   }
   dismissGap(id: number) { return this.call(this.http.delete(`/experience-gaps/${id}`)); }
   savedSearches() { return this.call(this.http.get<SearchPreset[]>('/search/saved')); }

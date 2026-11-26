@@ -166,3 +166,69 @@ def test_a_skill_the_match_table_found_is_not_a_gap(client, profile_data, make_j
     skills = [g["skill"] for g in client.get("/experience-gaps", params={"job_id": job["id"]}).json()]
     assert "Cypress" in skills                                   # missing, spelled as the posting spells it
     assert not any("TestNG" in s or "JUnit" in s for s in skills)   # either one meets it, and JUnit is there
+
+
+def test_the_ai_writes_the_gap_line_at_the_best_fitting_employer(client, profile_data, make_job, fake_llm):
+    client.put("/profile", json=profile_data).raise_for_status()
+    job = make_job(title="SDET", description="Required qualifications:\n- Hands-on experience with Cypress",
+                   required_skills=["Cypress"], preferred_skills=[])
+    gap = client.get("/experience-gaps", params={"job_id": job["id"]}).json()[0]
+    owner = profile_data["experience"][0]["company"]
+    fake_llm.queue = [
+        # first answer breaks the rules (a number, no skill named): it is sent back once with what to fix
+        {"owner": owner, "text": "Built 40 browser tests for the checkout flow and checked validation errors.",
+         "based_on": [], "why": "x"},
+        {"owner": owner.upper(), "text": "Built Cypress tests for the checkout flow, checking form validation errors "
+         "and payment confirmation pages before each release.", "based_on": [], "why": "Checkout testing happened there."},
+    ]
+    d = client.post(f"/experience-gaps/{gap['id']}/draft").json()
+    assert d["draft_owner"] == owner and d["draft_text"].startswith("Built Cypress tests")
+    assert "FIX:" in fake_llm.calls[1]["user"] and "numbers" in fake_llm.calls[1]["user"]
+    assert owner in fake_llm.calls[0]["user"]                       # the employers and their records are given
+    # kept: asking again without "again" makes no new AI call
+    assert client.post(f"/experience-gaps/{gap['id']}/draft").json()["draft_text"] == d["draft_text"]
+    assert len(fake_llm.calls) == 2
+    # nothing is in the bank until it is confirmed as true
+    assert all("Cypress" not in r["text"] for r in client.get("/profile").json()["experience_bank"])
+    done = client.post(f"/experience-gaps/{gap['id']}/confirm",
+                       json={"owner": d["draft_owner"], "text": d["draft_text"], "confirmed": True})
+    assert done.status_code == 200, done.text
+    assert any(r["text"] == d["draft_text"] for r in client.get("/profile").json()["experience_bank"])
+
+
+def test_a_gap_draft_that_keeps_failing_is_not_saved(client, profile_data, make_job, fake_llm):
+    client.put("/profile", json=profile_data).raise_for_status()
+    job = make_job(title="SDET", description="- Cypress", required_skills=["Cypress"], preferred_skills=[])
+    gap = client.get("/experience-gaps", params={"job_id": job["id"]}).json()[0]
+    fake_llm.answer = {"owner": "Nowhere", "text": "Led the [team].", "based_on": [], "why": ""}
+    assert client.post(f"/experience-gaps/{gap['id']}/draft").status_code >= 400
+    assert client.get("/experience-gaps", params={"job_id": job["id"]}).json()[0]["draft_text"] is None
+
+
+def test_several_confirmed_lines_are_added_together_and_the_resume_is_written_once(client, profile_data, make_job,
+                                                                                   monkeypatch):
+    from app import preparation
+    client.put("/profile", json=profile_data).raise_for_status()
+    job = make_job(title="SDET", description="Required qualifications:\n- Cypress\n- Gatling",
+                   required_skills=["Cypress", "Gatling"], preferred_skills=[])
+    gaps = {g["skill"]: g for g in client.get("/experience-gaps", params={"job_id": job["id"]}).json()}
+    assert set(gaps) == {"Cypress", "Gatling"}
+    runs = []
+    monkeypatch.setattr(preparation.Preparer, "refresh_resume", lambda self, aid: runs.append(aid) or None)
+    owner = profile_data["experience"][0]["company"]
+    lines = {"Cypress": "Built Cypress tests for the checkout flow and checked form validation errors.",
+             "Gatling": "Ran Gatling load tests on the checkout API and compared response times between builds."}
+    # one bad line: nothing is added
+    bad = client.post("/experience-gaps/confirm", json={"confirmed": True, "items": [
+        {"id": gaps["Cypress"]["id"], "owner": owner, "text": lines["Cypress"]},
+        {"id": gaps["Gatling"]["id"], "owner": owner, "text": "Did some [thing] here."}]})
+    assert bad.status_code == 409 and bad.json()["detail"].startswith("Gatling:")
+    assert not any(r["id"].startswith("GAP") for r in client.get("/profile").json()["experience_bank"])
+    ok = client.post("/experience-gaps/confirm", json={"confirmed": True, "items": [
+        {"id": gaps[s]["id"], "owner": owner, "text": t} for s, t in lines.items()]})
+    assert ok.status_code == 200, ok.text
+    assert len(ok.json()["record_ids"]) == 2 and len(ok.json()["application_ids"]) == 1
+    assert runs == ok.json()["application_ids"]                     # one resume run for both lines
+    bank = client.get("/profile").json()["experience_bank"]
+    assert {r["text"] for r in bank if r["id"].startswith("GAP")} == set(lines.values())
+    assert client.get("/experience-gaps", params={"job_id": job["id"]}).json() == []

@@ -223,6 +223,7 @@ export interface Activity { application_id: number; notes: string; notes_saved_a
 export interface GapSuggestion {
   id: number; job_id: number; job_title: string; job_company: string;
   skill: string; requirement: string; owner_hint: string | null; example: string;
+  draft_owner?: string | null; draft_text?: string | null; draft_note?: string | null;
 }
 export interface SearchFilters { title: string; country: string; date_from: string; date_to: string; }
 export interface SearchPreset { id: number; name: string; filters: SearchFilters; last_run_at: string | null; }
