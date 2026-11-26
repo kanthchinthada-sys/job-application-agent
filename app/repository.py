@@ -16,6 +16,7 @@ from app.errors import ConflictError, NotFoundError
 from app.schemas import (
     DocumentOut,
     ApplicationCreate,
+    ApplicationDetails,
     ApplicationOut,
     ApplicationStatus,
     ApplicationUpdate,
@@ -35,15 +36,16 @@ def _now() -> str:
 # Profile
 # ---------------------------------------------------------------------------
 
-def save_profile(conn: sqlite3.Connection, profile: Profile) -> ProfileOut:
+def save_profile(conn: sqlite3.Connection, profile: Profile, *, commit: bool = True) -> ProfileOut:
     now = _now()
-    data = profile.model_dump_json()  # mode="json": URLs become strings
+    data = profile.model_dump_json(exclude={"updated_at"})
     conn.execute(
         """INSERT INTO profile (id, data, updated_at) VALUES (1, ?, ?)
            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at""",
         (data, now),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return get_profile(conn)
 
 
@@ -107,15 +109,21 @@ def create_job(conn: sqlite3.Connection, job: JobCreate) -> JobOut:
             _now(),
         ),
     )
+    result = get_job(conn, cur.lastrowid)
+    from app import gap_review
+    gap_review.sync(conn, result)
     conn.commit()
-    return get_job(conn, cur.lastrowid)
+    return get_job(conn, result.id)
 
 
 def get_job(conn: sqlite3.Connection, job_id: int) -> JobOut:
     row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if row is None:
         raise NotFoundError(f"Job {job_id} not found.")
-    return _row_to_job(row)
+    out = _row_to_job(row)
+    out.pending_technical_gaps = conn.execute(
+        "SELECT COUNT(*) FROM gap_suggestions WHERE job_id=? AND state='pending'", (job_id,)).fetchone()[0]
+    return out
 
 
 def update_job(conn: sqlite3.Connection, job_id: int, changes: dict) -> JobOut:
@@ -130,6 +138,9 @@ def update_job(conn: sqlite3.Connection, job_id: int, changes: dict) -> JobOut:
         values.append(json.dumps(value) if key.endswith("_skills") else value)
     if sets:
         conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id = ?", (*values, job_id))
+        if set(changes) & {"description", "required_skills", "preferred_skills"}:
+            from app import gap_review
+            gap_review.sync(conn, get_job(conn, job_id))
         conn.commit()
     return get_job(conn, job_id)
 
@@ -151,7 +162,7 @@ def _record_event(conn, application_id, from_status, to_status, note, when) -> N
     )
 
 
-def create_application(conn: sqlite3.Connection, data: ApplicationCreate) -> ApplicationOut:
+def create_application(conn: sqlite3.Connection, data: ApplicationCreate, *, commit: bool = True) -> ApplicationOut:
     get_job(conn, data.job_id)  # raises NotFoundError if the job does not exist
 
     existing = conn.execute("SELECT id FROM applications WHERE job_id = ?", (data.job_id,)).fetchone()
@@ -174,13 +185,16 @@ def create_application(conn: sqlite3.Connection, data: ApplicationCreate) -> App
         conn.rollback()
         raise ConflictError(f"An application for job {data.job_id} already exists.") from exc
     _record_event(conn, cur.lastrowid, None, data.status.value, "created", now)
-    conn.commit()
+    if commit:
+        conn.commit()
     return get_application(conn, cur.lastrowid)
 
 
 _APP_SELECT = """
     SELECT a.*, j.title AS job_title, j.company AS company, j.source_url AS source_url
+       , t.next_action, t.due_date, t.interview_at, t.submitted_resume_id, t.submitted_cover_letter_id
     FROM applications a JOIN jobs j ON j.id = a.job_id
+    LEFT JOIN application_details t ON t.application_id = a.id
 """
 
 
@@ -202,6 +216,7 @@ def _row_to_application(conn, row: sqlite3.Row) -> ApplicationOut:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         history=[dict(e) for e in events],
+        **{key: row[key] for key in ApplicationDetails.model_fields},
         allowed_next=allowed_next(ApplicationStatus(row["status"])),
         documents_ready=[r[0] for r in conn.execute(
             "SELECT DISTINCT kind FROM documents WHERE application_id = ? AND kind IN ('resume', 'cover_letter') "
@@ -247,6 +262,23 @@ def update_application(conn: sqlite3.Connection, application_id: int, patch: App
             "'submission_uncertain' until you have it."
         )
 
+    details = patch.model_dump(mode="json", include=ApplicationDetails.model_fields.keys(), exclude_unset=True)
+    if details:
+        for field, kind in (("submitted_resume_id", "resume"), ("submitted_cover_letter_id", "cover_letter")):
+            if details.get(field) is not None:
+                doc = get_document(conn, details[field])
+                if doc.application_id != application_id or doc.kind != kind:
+                    raise ConflictError(f"Choose a {kind.replace('_', ' ')} version from this application.")
+        values = current.model_dump(mode="json", include=ApplicationDetails.model_fields.keys()) | details
+        conn.execute(
+            """INSERT INTO application_details (application_id, next_action, due_date, interview_at,
+                   submitted_resume_id, submitted_cover_letter_id) VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(application_id) DO UPDATE SET next_action=excluded.next_action,
+                   due_date=excluded.due_date, interview_at=excluded.interview_at,
+                   submitted_resume_id=excluded.submitted_resume_id,
+                   submitted_cover_letter_id=excluded.submitted_cover_letter_id""",
+            (application_id, *(values[key] for key in ApplicationDetails.model_fields)),
+        )
     now = _now()
     conn.execute(
         "UPDATE applications SET status = ?, notes = ?, submission_confirmation = ?, updated_at = ? WHERE id = ?",
@@ -268,17 +300,18 @@ def _row_to_document(row: sqlite3.Row) -> DocumentOut:
 
 def add_document(conn, application_id: int, kind: str, question: str, content: str,
                  source: str, model: str | None, review: dict) -> DocumentOut:
-    get_application(conn, application_id)  # 404 if missing
-    row = conn.execute(
-        "SELECT COALESCE(MAX(version), 0) AS v FROM documents WHERE application_id = ? AND kind = ? AND question = ?",
-        (application_id, kind, question),
-    ).fetchone()
-    cur = conn.execute(
-        """INSERT INTO documents (application_id, kind, question, version, content, source, model, review, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (application_id, kind, question, row["v"] + 1, content, source, model, json.dumps(review), _now()),
-    )
-    conn.commit()
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        get_application(conn, application_id)  # 404 if missing
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) AS v FROM documents WHERE application_id = ? AND kind = ? AND question = ?",
+            (application_id, kind, question),
+        ).fetchone()
+        cur = conn.execute(
+            """INSERT INTO documents (application_id, kind, question, version, content, source, model, review, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (application_id, kind, question, row["v"] + 1, content, source, model, json.dumps(review), _now()),
+        )
     return get_document(conn, cur.lastrowid)
 
 

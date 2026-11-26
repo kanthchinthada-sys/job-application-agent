@@ -1,6 +1,7 @@
 // Shapes of the backend's JSON (see app/schemas.py). Only the fields the screen uses.
 
 export interface Job {
+  pending_technical_gaps?: number;
   id: number;
   title: string;
   company: string;
@@ -60,6 +61,11 @@ export interface Application {
   last_activity?: string | null;
   created_at?: string;
   updated_at?: string;
+  next_action?: string | null;
+  due_date?: string | null;
+  interview_at?: string | null;
+  submitted_resume_id?: number | null;
+  submitted_cover_letter_id?: number | null;
 }
 
 export interface AiStatus { provider?: string; reachable: boolean; model: string; model_available: boolean; error?: string; }
@@ -175,6 +181,7 @@ export interface FoundJob {
   source: string; title: string; company: string; location: string; posted: string | null; url: string;
   description: string; description_is_excerpt: boolean; remote: boolean; where: string; title_match: string;
   already_added_job_id: number | null; credit_url?: string;
+  new_since_last_run?: boolean; technical_matches?: string[]; technical_gaps?: string[]; salary_text?: string | null; workplace?: string | null;
 }
 export interface ElsewhereLink { name: string; url: string; note: string; }
 export interface SourceStatus { name: string; ok: boolean; found: number; kept: number; note: string; }
@@ -211,3 +218,28 @@ export interface Requirements { job_id: number; role_types: string[]; has_bank: 
 export interface ActivityItem { at: string; type: 'status' | 'document'; text: string; note?: string | null;
   document_id?: number; kind?: string; version?: number; source?: string; }
 export interface Activity { application_id: number; notes: string; notes_saved_at: string; items: ActivityItem[]; }
+
+
+export interface GapSuggestion {
+  id: number; job_id: number; job_title: string; job_company: string;
+  skill: string; requirement: string; owner_hint: string | null; example: string;
+}
+export interface SearchFilters { title: string; country: string; date_from: string; date_to: string; }
+export interface SearchPreset { id: number; name: string; filters: SearchFilters; last_run_at: string | null; }
+export interface InterviewPrep {
+  versions: Record<string, { id: number; version: number; submitted: boolean }>;
+  questions: { topic: string; question: string; owner: string; record_id: string; evidence: string;
+               caveat: string | null; on_resume: boolean; in_letter: boolean }[];
+  topics_to_review: string[];
+}
+export interface SectionEdit {
+  section: 'summary' | 'skills' | 'bullet' | 'paragraph'; text: string; role_index?: number; item_index?: number; save?: boolean;
+}
+export interface SectionReview {
+  previous: string; candidate: string; warnings: string[]; evidence: BankRecord[]; document: Doc | null;
+}
+export interface BenchmarkResult {
+  provider: string; model: string; seconds: number; input_tokens: number | null; output_tokens: number | null;
+  estimated_usd: number | null; calls: number; error?: string; summary?: string; skills?: string[];
+  letter?: string; resume_warnings?: string[]; letter_warnings?: string[]; letter_removed?: number; humanizer_score?: number | null;
+}

@@ -5,6 +5,7 @@ import { Router, RouterLink } from '@angular/router';
 
 import { Api, ApiError } from '../api';
 import { ApplicationsListState } from '../applications-list-state';
+import { today } from '../find-jobs-state';
 import { Application, pretty } from '../models';
 
 export const STATUS_ORDER = ['preparing', 'ready_for_review', 'submitted_confirmed', 'submission_uncertain',
@@ -17,6 +18,23 @@ export const STATUS_ORDER = ['preparing', 'ready_for_review', 'submitted_confirm
   template: `
     <div class="card">
       <h2>Applications</h2>
+      @if (todayRows().length) {
+        <section class="panel" aria-label="Today">
+          <h3>Today</h3>
+          @for (a of todayRows(); track a.id) {
+            <div class="actions">
+              <button class="link-btn" type="button" (click)="open(a.id)">{{ a.job_title }} · {{ a.company }}</button>
+              @if (a.due_date) {
+                <span class="small" [class.warn-text]="a.due_date < todayDate">{{ a.due_date < todayDate ? 'Overdue' : a.due_date === todayDate ? 'Due today' : a.due_date }} · {{ a.next_action || 'Follow up' }}</span>
+              }
+              @if (a.interview_at && a.interview_at >= nowIso) {
+                <span class="small">Interview {{ a.interview_at | date:'MMM d, h:mm a' }}</span>
+              }
+              @if (readyToSubmit(a)) { <span class="small badge ok">Ready to review and submit</span> }
+            </div>
+          }
+        </section>
+      }
       <div class="toolbar">
         <div><label for="a-search">Search by job title or company</label>
           <input id="a-search" type="search" [(ngModel)]="state.search" placeholder="e.g. Acme or QA Lead"></div>
@@ -69,6 +87,16 @@ export class ApplicationsPage implements OnInit, OnDestroy {
   protected readonly apps = signal<Application[] | null>(null);
   protected readonly error = signal('');
   protected readonly pretty = pretty;
+  protected readonly todayDate = today();
+  protected readonly nowIso = new Date().toISOString();
+  protected readonly todayRows = computed(() => (this.apps() ?? []).filter(a =>
+    !['offer', 'rejected', 'withdrawn'].includes(a.status) &&
+    (!!a.due_date && a.due_date <= this.todayDate || !!a.interview_at && a.interview_at >= this.nowIso || this.readyToSubmit(a)))
+    .sort((a, b) => (a.due_date ?? a.interview_at ?? '9999').localeCompare(b.due_date ?? b.interview_at ?? '9999')));
+  protected readyToSubmit(a: Application) {
+    return a.status === 'ready_for_review' ||
+      a.status === 'preparing' && ['resume', 'cover_letter'].every(kind => a.documents_ready?.includes(kind));
+  }
   protected readonly statuses = computed(() => {
     const used = new Set((this.apps() ?? []).map(a => a.status));
     return [...STATUS_ORDER.filter(s => used.has(s)), ...[...used].filter(s => !STATUS_ORDER.includes(s))];

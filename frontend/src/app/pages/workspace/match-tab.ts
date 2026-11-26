@@ -1,3 +1,4 @@
+import { GapReviewPanel } from '../gap-review-panel';
 import { Component, computed, effect, inject, input, signal, untracked } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
@@ -9,8 +10,11 @@ import { Job, RequirementEvidence, Requirements } from '../../models';
  *  it. The same deterministic analysis the resume uses: no model calls. */
 @Component({
   selector: 'app-match-tab',
-  imports: [FormsModule, RouterLink],
+  imports: [FormsModule, RouterLink, GapReviewPanel],
   template: `
+    @if (job().pending_technical_gaps) {
+      <app-gap-review-panel [jobId]="job().id" (changed)="load(job().id)" />
+    }
     <div class="card" data-testid="match">
       @if (error(); as e) {
         <div class="msg bad">{{ e }}</div>
@@ -111,7 +115,7 @@ export class MatchTab {
     });
   }
 
-  private async load(id: number) {
+  protected async load(id: number) {
     this.data.set(null); this.error.set(''); this.needsProfile.set(false);
     try {
       this.data.set(await this.api.requirements(id));

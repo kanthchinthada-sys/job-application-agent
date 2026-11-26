@@ -77,6 +77,40 @@ CREATE TABLE IF NOT EXISTS intake_runs (
     updated_at      TEXT NOT NULL
 );
 
+-- Experience bank review queue. A suggested example is never part of the verified profile.
+CREATE TABLE IF NOT EXISTS gap_suggestions (
+    id        INTEGER PRIMARY KEY,
+    job_id    INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    skill     TEXT NOT NULL COLLATE NOCASE,
+    requirement TEXT NOT NULL,
+    owner_hint TEXT,
+    example    TEXT NOT NULL,
+    state      TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'approved', 'dismissed')),
+    record_id  TEXT,
+    UNIQUE (job_id, skill)
+);
+
+CREATE TABLE IF NOT EXISTS resume_refresh_requests (
+    application_id INTEGER PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS application_details (
+    application_id INTEGER PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
+    next_action TEXT,
+    due_date TEXT,
+    interview_at TEXT,
+    submitted_resume_id INTEGER REFERENCES documents(id),
+    submitted_cover_letter_id INTEGER REFERENCES documents(id)
+);
+
+CREATE TABLE IF NOT EXISTS saved_searches (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    filters TEXT NOT NULL,
+    last_run_at TEXT,
+    seen TEXT NOT NULL DEFAULT '[]'
+);
+
 -- Keep the most recent completed free search in this workspace so any app tab can resume it.
 CREATE TABLE IF NOT EXISTS last_job_search (
     id INTEGER PRIMARY KEY CHECK (id = 1),

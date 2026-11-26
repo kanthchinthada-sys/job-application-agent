@@ -9,6 +9,7 @@ import { ApplyPlan } from '../apply-plan';
 import { HandoffPanel } from '../handoff-panel';
 import { LetterView } from './letter-view';
 import { ResumeView } from './resume-view';
+import { SectionEditor } from './section-editor';
 
 type Kind = 'resume' | 'cover_letter';
 export const KIND_LABEL: Record<Kind, string> = { resume: 'Resume', cover_letter: 'Cover letter' };
@@ -17,7 +18,7 @@ export const KIND_LABEL: Record<Kind, string> = { resume: 'Resume', cover_letter
  *  Opening this tab only reads what is saved: it never calls the model. */
 @Component({
   selector: 'app-documents-tab',
-  imports: [FormsModule, DatePipe, MsgBox, ResumeView, LetterView, HandoffPanel, ApplyPlan],
+  imports: [FormsModule, DatePipe, MsgBox, ResumeView, LetterView, HandoffPanel, ApplyPlan, SectionEditor],
   template: `
     @if (excerpt(); as j) {
       <div class="card" data-testid="excerpt">
@@ -85,6 +86,9 @@ export const KIND_LABEL: Record<Kind, string> = { resume: 'Resume', cover_letter
           }
         </div>
         @if (selected(view()); as d) {
+          @for (version of [d]; track version.id) {
+            <app-section-editor [doc]="version" [versions]="versionsOf(view())" (saved)="afterSave($event)" />
+          }
           @if (profileChangedSince(view())) {
             <div class="msg info" data-testid="profile-changed">Profile updated since this draft.
               <button class="secondary tight" type="button" style="margin-left:8px" [disabled]="starting() || anyRunning()"
@@ -213,7 +217,7 @@ export class DocumentsTab {
 
   /** The checks belong to the AI draft: an edited version shows the checks of the draft it came from. */
   reviewFor(kind: Kind, d: Doc): Doc {
-    if (d.source === 'ai') return d;
+    if (d.source === 'ai' || d.review?.method === 'section_edit') return d;
     return this.versionsOf(kind).find(v => v.source === 'ai' && v.version < d.version) ?? d;
   }
 

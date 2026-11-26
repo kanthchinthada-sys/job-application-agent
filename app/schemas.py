@@ -9,7 +9,7 @@ Naming convention: ``XCreate`` / ``XUpdate`` are request bodies, ``XOut`` are
 responses (they add server-generated fields such as ``id`` and timestamps).
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Annotated, Literal
 
@@ -238,6 +238,7 @@ class JobOut(JobCreate):
     id: int
     created_at: datetime
     skills_source: Literal["manual"] = "manual"
+    pending_technical_gaps: int = Field(default=0, exclude_if=lambda count: count == 0)
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +345,15 @@ class ApplicationCreate(StrictModel):
         return self
 
 
-class ApplicationUpdate(StrictModel):
+class ApplicationDetails(StrictModel):
+    next_action: Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)] | None = None
+    due_date: date | None = None
+    interview_at: datetime | None = None
+    submitted_resume_id: Annotated[int, Field(gt=0)] | None = None
+    submitted_cover_letter_id: Annotated[int, Field(gt=0)] | None = None
+
+
+class ApplicationUpdate(ApplicationDetails):
     """PATCH body: only the fields you send are changed."""
 
     status: ApplicationStatus | None = None
@@ -379,6 +388,11 @@ class ApplicationOut(BaseModel):
     updated_at: datetime
     history: list[ApplicationEvent]
     allowed_next: list[ApplicationStatus] = []
+    next_action: str | None = None
+    due_date: date | None = None
+    interview_at: datetime | None = None
+    submitted_resume_id: int | None = None
+    submitted_cover_letter_id: int | None = None
     documents_ready: list[str] = []          # document kinds saved for it ("resume", "cover_letter"), not a status
     last_activity: datetime | None = None    # latest of: status change, notes, a document version
 

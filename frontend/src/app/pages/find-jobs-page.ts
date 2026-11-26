@@ -4,7 +4,7 @@ import { RouterLink } from '@angular/router';
 
 import { Api, ApiError } from '../api';
 import { daysAgo, FindJobsState, today } from '../find-jobs-state';
-import { ApifyRun, CountryOption, FoundJob } from '../models';
+import { ApifyRun, CountryOption, FoundJob, SearchPreset } from '../models';
 import { Msg, MsgBox } from '../ui';
 
 /** Find jobs: three filters (title, country, date range) across free job sources; Apply prepares everything. */
@@ -31,6 +31,23 @@ import { Msg, MsgBox } from '../ui';
         }
       </div>
       <div><button class="primary" type="button" [disabled]="busy()" (click)="search()">{{ busy() ? 'Searching…' : 'Search' }}</button></div>
+      <details class="panel" (toggle)="openPresets($event)">
+        <summary><b>Saved searches</b></summary>
+        <div class="row">
+          <label>Save these filters as<input [(ngModel)]="saveName" maxlength="100" placeholder="e.g. SDET Canada"></label>
+          <button class="secondary" type="button" [disabled]="!saveName.trim() || !title().trim() || !country()"
+                  (click)="savePreset()">Save search</button>
+        </div>
+        <p class="small muted">Running a saved search moves its date range forward and marks jobs newly found since the last run.</p>
+        @for (preset of saved(); track preset.id) {
+          <div class="actions">
+            <b>{{ preset.name }}</b> <span class="small muted">{{ preset.filters.title }} · {{ preset.filters.country }}</span>
+            <button class="secondary tight" type="button" [disabled]="busy()" (click)="runPreset(preset)">Run</button>
+            <button class="link-btn" type="button" (click)="removePreset(preset)">Remove</button>
+          </div>
+        }
+        @if (presetMessage()) { <p role="status" class="small">{{ presetMessage() }}</p> }
+      </details>
       <div class="apify small" data-testid="apify">
         @if (state.apifySettings(); as a) {
           @if (a.configured) {
@@ -87,14 +104,22 @@ import { Msg, MsgBox } from '../ui';
           <p class="small" style="margin-top:0"><b>{{ jobs().length }} jobs</b> from employer career sites (Apify).</p>
         }
         @if (jobs().length) {
+          <div class="toolbar">
+            <label>Order <select [(ngModel)]="order"><option value="recent">Newest</option><option value="fit">Technical overlap</option></select></label>
+            <label><input type="checkbox" [(ngModel)]="newOnly"> Only new since last saved search</label>
+          </div>
           <table>
             <thead><tr><th>Job</th><th>Where</th><th>Posted</th><th>Source</th><th></th></tr></thead>
             <tbody>
-              @for (j of jobs(); track j.url) {
+              @for (j of visibleJobs(); track j.url) {
                 <tr>
                   <td><b><a [href]="j.url" target="_blank" rel="noopener">{{ j.title }}</a></b><br>
-                    <span class="muted small">{{ j.company }}</span></td>
-                  <td class="small">{{ j.where }}</td>
+                    <span class="muted small">{{ j.company }}</span>
+                    @if (j.new_since_last_run) { <span class="label">New</span> }
+                    @if (j.salary_text) { <div class="small">{{ j.salary_text }}</div> }
+                    @if (j.technical_matches?.length) { <div class="small good">Evidence: {{ j.technical_matches!.slice(0, 5).join(', ') }}</div> }
+                    @if (j.technical_gaps?.length) { <div class="small warn-text">Review: {{ j.technical_gaps!.slice(0, 5).join(', ') }}</div> }</td>
+                  <td class="small">{{ j.where }} @if (j.workplace && !j.where.toLowerCase().includes(j.workplace)) { · {{ j.workplace }} }</td>
                   <td class="small">{{ j.posted || '—' }}</td>
                   <td class="small muted">
                     @if (j.credit_url) { via <a [href]="j.credit_url" target="_blank" rel="noopener">{{ j.source }}</a> }
@@ -113,7 +138,7 @@ import { Msg, MsgBox } from '../ui';
                     }
                   </td>
                 </tr>
-              }
+              } @empty { <tr><td colspan="5">No newly found jobs in this saved search run.</td></tr> }
             </tbody>
           </table>
           <p class="small muted">Apply opens the employer's page in a new tab and prepares your tailored resume and cover
@@ -161,8 +186,50 @@ export class FindJobsPage implements OnInit, OnDestroy {
     }
     return [...out.values()].sort((a, b) => (b.posted ?? '').localeCompare(a.posted ?? ''));
   });
+  protected readonly saved = signal<SearchPreset[]>([]);
+  protected readonly presetMessage = signal('');
+  protected readonly order = signal('recent');
+  protected readonly newOnly = signal(false);
+  protected saveName = '';
+  protected readonly visibleJobs = computed(() => {
+    const jobs = this.jobs().filter(j => !this.newOnly() || j.new_since_last_run);
+    if (this.order() === 'fit') jobs.sort((a, b) =>
+      (b.technical_matches?.length ?? 0) - (a.technical_matches?.length ?? 0) ||
+      (a.technical_gaps?.length ?? 0) - (b.technical_gaps?.length ?? 0));
+    return jobs;
+  });
   protected readonly busy = this.state.searching;
   protected readonly msg = signal<Msg | null>(null);
+
+  protected openPresets(e: Event) {
+    if ((e.target as HTMLDetailsElement).open) void this.loadPresets();
+  }
+
+  private async loadPresets() {
+    try { this.saved.set(await this.api.savedSearches()); }
+    catch (e) { this.presetMessage.set((e as ApiError).message); }
+  }
+
+  protected async savePreset() {
+    try {
+      await this.api.saveSearch(this.saveName.trim(), { title: this.title(), country: this.country(),
+        date_from: this.dateFrom(), date_to: this.dateTo() });
+      this.saveName = '';
+      this.presetMessage.set('Search saved.');
+      await this.loadPresets();
+    } catch (e) { this.presetMessage.set((e as ApiError).message); }
+  }
+
+  protected async runPreset(preset: SearchPreset) {
+    this.newOnly.set(false);
+    await this.state.runPreset(preset.id, preset.filters.title);
+    await this.loadPresets();
+  }
+
+  protected async removePreset(preset: SearchPreset) {
+    try { await this.api.deleteSavedSearch(preset.id); await this.loadPresets(); }
+    catch (e) { this.presetMessage.set((e as ApiError).message); }
+  }
 
   async ngOnInit() {
     const restoring = this.state.restoreSearch();

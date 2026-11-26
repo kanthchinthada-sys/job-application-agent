@@ -1,3 +1,4 @@
+import { GapReviewPanel } from './gap-review-panel';
 import { Component, inject, OnDestroy, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
@@ -16,7 +17,7 @@ type Field = 'title' | 'company' | 'location' | 'skills';
 const UNKNOWN_COMPANY = 'Unknown company';
 @Component({
   selector: 'app-add-job-page',
-  imports: [FormsModule, MsgBox],
+  imports: [FormsModule, MsgBox, GapReviewPanel],
   template: `
     <div class="card">
       <h2>Add a job</h2>
@@ -66,6 +67,9 @@ const UNKNOWN_COMPANY = 'Unknown company';
     @if (added(); as a) {
       <div class="card" data-testid="added-job">
         <h2>Check the details</h2>
+        @if (a.job.pending_technical_gaps) {
+          <app-gap-review-panel [jobId]="a.job.id" />
+        }
         @if (aiState() === 'pending') {
           <div class="msg info" data-testid="ai-pending">The local AI is checking the highlighted fields in the background.
             You can correct them now: anything you change is kept, even if the AI answers later.</div>
@@ -199,7 +203,7 @@ export class AddJobPage implements OnDestroy {
       this.notes.set(s.notes);
       this.aiState.set(s.ai_state);
       const a = this.added();
-      if (a) this.added.set({ ...a, intake: { ...a.intake, found_by: s.found_by } });
+      if (a) this.added.set({ ...a, job: s.job, intake: { ...a.intake, found_by: s.found_by } });
     };
     this.timer = setTimeout(tick, AddJobPage.pollMs);
   }

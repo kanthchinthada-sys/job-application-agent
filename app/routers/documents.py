@@ -260,3 +260,52 @@ def latest_resume(application_id: Id, conn: Conn):
         from app.errors import NotFoundError
         raise NotFoundError("No tailored resume yet for this application. Click 'Tailor resume' first.")
     return print_resume(max(resumes, key=lambda d: d.version).id, conn)
+
+
+class SectionEdit(BaseModel):
+    section: Literal["summary", "skills", "bullet", "paragraph"]
+    text: str
+    role_index: int | None = None
+    item_index: int | None = None
+    save: bool = False
+
+
+@router.post("/documents/{document_id}/section")
+def edit_section(document_id: Id, body: SectionEdit, conn: Conn):
+    """Preview a scoped edit and its checks. Save explicitly to create a new version."""
+    from app import document_sections
+
+    text = body.text.strip()
+    if not 1 <= len(text) <= 5000:
+        raise ConflictError("Enter one section of up to 5,000 characters.")
+    doc = repository.get_document(conn, document_id)
+    application = repository.get_application(conn, doc.application_id)
+    profile = repository.get_profile(conn)
+    job = repository.get_job(conn, application.job_id)
+    previous, content, warnings, evidence = document_sections.change(
+        doc, body.section, text, profile, job, body.role_index, body.item_index)
+    result = None
+    if body.save:
+        if previous == text:
+            raise ConflictError("Make a change before saving a new version.")
+        review = {"method": "section_edit", "edited_from_version": doc.version, "warnings": warnings,
+                  "facts_used": [r.id for r in evidence], "section": body.section}
+        if doc.kind == "resume":
+            from app import ats, layout, preferences
+            resume = tailoring.TailoredResume.model_validate_json(content)
+            supported = resume.model_copy(deep=True)
+            if body.section == "skills" and tailoring.drop_unsupported_skills(supported, profile):
+                raise ConflictError("Remove the unsupported skills listed in the edit check before saving.")
+            ignored = {s.lower() for s in job.required_skills + job.preferred_skills
+                       if preferences.check_title(job.title, [s])[0] == "strong"}
+            coverage = ats.analyze(tailoring.resume_text(resume), tailoring.profile_text(profile),
+                                   job.required_skills, job.preferred_skills, ignored, profile)
+            review["ats"] = {"score_before": doc.review.get("ats", {}).get("score", coverage.score),
+                             **coverage.model_dump()}
+            page = layout.browser_measure(resume_render.render(resume, job.title, job.company))
+            if page is not None:
+                review["layout"] = {"measured": True, "printed_pages": page[1],
+                                    "max_pages": 2, "fits": page[1] == 2}
+        result = repository.add_document(conn, doc.application_id, doc.kind, doc.question, content,
+                                         "user_edit", None, review)
+    return {"previous": previous, "candidate": text, "warnings": warnings, "evidence": evidence, "document": result}

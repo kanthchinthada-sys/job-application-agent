@@ -149,6 +149,11 @@ class FoundJob(BaseModel):
     credit_url: str = ""             # the posting on the source site (some sources require this link)
     title_match: str = "strong"      # strong | partial
     already_added_job_id: int | None = None
+    new_since_last_run: bool = False
+    technical_matches: list[str] = []
+    technical_gaps: list[str] = []
+    salary_text: str | None = None
+    workplace: str | None = None
 
     @field_validator("title")
     @classmethod

@@ -8,8 +8,10 @@ Progress is kept in memory: after a restart, finished documents are of course st
 preparation simply shows as not started, and you can start it again.
 """
 
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -75,17 +77,29 @@ class Preparer:
         self.db_path, self.llm, self.legacy = db_path, llm, legacy
         self.parallel = int(os.environ.get("LLM_PARALLEL", "1") or 1)   # >1 only if your model server allows it
         self._status: dict[int, Preparation] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prepare")   # one at a time: one local AI
         self._mark_interrupted()
+        try:
+            with closing(database.connect(self.db_path)) as conn:
+                requests = conn.execute("SELECT application_id FROM resume_refresh_requests").fetchall()
+        except sqlite3.OperationalError as exc:
+            # The normal app initializes the workspace first. Standalone queue callers may not.
+            if "no such table" not in str(exc):
+                raise
+            requests = []
+        for row in requests:
+            self.refresh_resume(row["application_id"])
 
     # --- saved progress (this workspace's database): a restart never loses track of a run -----------------
-    def _save(self, p: Preparation) -> None:
+    def _save(self, p: Preparation, *, consume_refresh: bool = False) -> None:
         try:
             conn = database.connect(self.db_path)
             try:
                 conn.execute("INSERT OR REPLACE INTO generation_runs (application_id, data, updated_at) VALUES (?, ?, ?)",
                              (p.application_id, p.model_dump_json(), _now()))
+                if consume_refresh:
+                    conn.execute("DELETE FROM resume_refresh_requests WHERE application_id=?", (p.application_id,))
                 conn.commit()
             finally:
                 conn.close()
@@ -131,7 +145,8 @@ class Preparer:
                 return p.model_copy()
         return self._saved(application_id) or Preparation(application_id=application_id, state="idle")
 
-    def start(self, application_id: int, steps: tuple[str, ...] = STEPS) -> Preparation:
+    def start(self, application_id: int, steps: tuple[str, ...] = STEPS, *,
+              consume_refresh: bool = False) -> Preparation:
         with self._lock:
             current = self._status.get(application_id)
             if current and current.state in ("queued", "running"):
@@ -145,9 +160,22 @@ class Preparer:
                 application_id=application_id, state="queued", started_at=_now(), steps=list(steps),
                 failed_steps=carried,
                 message="Waiting for the AI (another application is being prepared)…" if busy else "Starting…")
-        self._save(current)
+        self._save(current, consume_refresh=consume_refresh)
         self._pool.submit(self._run, application_id, steps)
         return self.get(application_id)
+
+    def refresh_resume(self, application_id: int) -> Preparation:
+        """Coalesce confirmations that arrive while this application's documents are generating."""
+        with self._lock:
+            current = self.get(application_id)
+            if current.state in ("queued", "running"):
+                return current
+            with closing(database.connect(self.db_path)) as conn:
+                pending = conn.execute("SELECT 1 FROM resume_refresh_requests WHERE application_id=?",
+                                       (application_id,)).fetchone()
+            if pending:
+                return self.start(application_id, ("resume",), consume_refresh=True)
+            return current
 
     def _set(self, application_id: int, **changes) -> None:
         with self._lock:
@@ -163,6 +191,7 @@ class Preparer:
                 self._run_steps(application_id, steps)
             finally:
                 self._set(application_id, timing=m.report())
+                self.refresh_resume(application_id)
 
     def _run_steps(self, application_id: int, steps: tuple[str, ...]) -> None:
         import contextvars

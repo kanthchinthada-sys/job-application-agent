@@ -409,6 +409,22 @@ of them is there). Keywords nothing supports are reported as **gaps**, never add
 
 ## Applying and tracking
 
+- **Today** on Applications shows due follow-ups, upcoming interviews and applications ready to review. Set a
+  next action and due date in the application's workspace. When you confirm a submission, choose the document
+  versions you actually sent. Interview prep links to those versions and uses verified bank records to suggest
+  stories and technical topics to practise.
+- **Edit one section** in Documents to revise a summary, skill group, experience bullet or letter paragraph.
+  Compare against another saved version and check the edit before saving. A save creates a new version.
+- **Saved searches** in Find jobs reuse named filters with a rolling date range and mark newly found postings.
+  Sort by verified technical overlap and review the posting for any gaps. Salary and work arrangement appear
+  when the source identifies them.
+- **Technical gaps to verify** in the Experience bank and job workspace lists work the posting asks for that
+  the profile does not show. Examples are prompts. Choose the correct employer or project, describe what you
+  actually did, and confirm it before the app uses it. Confirmation queues a new resume for that job.
+- **Compare Claude and OpenAI** in Profile uses the same fictional posting and candidate for both providers.
+  You can use your saved key for its provider and enter the other key for that run. The comparison makes paid
+  API calls. Enter per-million-token rates to estimate cost from measured input and output tokens.
+
 - `GET /applications/{id}/handoff`: checklist, posting link, latest resume / cover letter / answers and your
   details to copy, for applying by hand. The agent never submits.
 - Status rules: an application can't move backwards past a submission (e.g. `submitted_confirmed` →

@@ -61,7 +61,7 @@ interface Tailored { summary: string; experience: Role[]; [k: string]: unknown; 
           <div class="small muted">How many of the technical keywords in the job description (tools, languages,
             practices; weighted by importance) appear on this resume. People skills aren't counted. It is not a hiring
             prediction{{ r.ats?.max_honest_score ? '; ' + r.ats.max_honest_score + '% is the most your real experience supports' : '' }}.</div>
-          @if (d.source !== 'ai') { <div class="small muted" style="margin-top:6px">Checks shown are from the AI draft v{{ reviewDoc().version }}; this is your edit v{{ d.version }}.</div> }
+          @if (d.source !== 'ai' && reviewDoc().id !== d.id) { <div class="small muted" style="margin-top:6px">Checks shown are from the AI draft v{{ reviewDoc().version }}; this is your edit v{{ d.version }}.</div> }
         </div>
         <div class="panel" data-testid="attention">
           <b>Needs your attention</b>
@@ -73,7 +73,7 @@ interface Tailored { summary: string; experience: Role[]; [k: string]: unknown; 
           <div class="panel" data-testid="excluded">
             <b>Left out: your profile doesn't support it</b>
             <ul class="small">@for (x of excluded(); track $index) { <li>{{ x }}</li> }</ul>
-            <div class="small muted">If one of these is true, add it to your profile (Job &amp; skill match → “I have this”) and generate again.</div>
+            <div class="small muted">If one of these is true, review the technical gap in Job &amp; skill match and verify your example.</div>
           </div>
         }
       </div>

@@ -5,7 +5,7 @@ import { firstValueFrom, Observable } from 'rxjs';
 import {
   AIMatchReport, AiSettings, AiStatus, Application, BankImportReport, BankRecord, RecordStatus, BoardSearch, Doc, ExtractedSkills, Handoff, Health, ImportedJob, Job, MatchReport,
   NewJob, QuickAdd, ResumeImport, CountryOption, SearchResult, FoundJob, ApplyResult, ApifyRun, ApifySettings, Preparation, Me, Requirements,
-  Activity, IntakeStatus } from './models';
+  Activity, IntakeStatus, GapSuggestion, SearchFilters, SearchPreset, InterviewPrep, SectionEdit, SectionReview, BenchmarkResult } from './models';
 
 /** An error from the backend, with its readable message (FastAPI's "detail"). */
 export class ApiError extends Error {
@@ -97,7 +97,9 @@ export class Api {
   startApplication(jobId: number) {
     return this.call(this.http.post<Application>('/applications', { job_id: jobId }));
   }
-  updateApplication(id: number, body: { status?: string; notes?: string; submission_confirmation?: string }) {
+  updateApplication(id: number, body: { status?: string; notes?: string; submission_confirmation?: string;
+    next_action?: string | null; due_date?: string | null; interview_at?: string | null;
+    submitted_resume_id?: number | null; submitted_cover_letter_id?: number | null }) {
     return this.call(this.http.patch<Application>(`/applications/${id}`, body));
   }
 
@@ -135,5 +137,29 @@ export class Api {
       '/profile/experience-line', body));
   }
   saveProfile(profile: unknown) { return this.call(this.http.put('/profile', profile)); }
+  experienceGaps(jobId?: number) {
+    const params: Record<string, string> = jobId === undefined ? {} : { job_id: String(jobId) };
+    return this.call(this.http.get<GapSuggestion[]>('/experience-gaps', { params }));
+  }
+  confirmGap(id: number, owner: string, text: string) {
+    return this.call(this.http.post<{ record_id: string; application_id: number; preparation: Preparation }>(
+      `/experience-gaps/${id}/confirm`, { owner, text, confirmed: true }));
+  }
+  dismissGap(id: number) { return this.call(this.http.delete(`/experience-gaps/${id}`)); }
+  savedSearches() { return this.call(this.http.get<SearchPreset[]>('/search/saved')); }
+  saveSearch(name: string, filters: SearchFilters) {
+    return this.call(this.http.post<SearchPreset>('/search/saved', { name, filters }));
+  }
+  runSavedSearch(id: number) { return this.call(this.http.post<SearchResult>(`/search/saved/${id}/run`, {})); }
+  deleteSavedSearch(id: number) { return this.call(this.http.delete(`/search/saved/${id}`)); }
+  interviewPrep(id: number) { return this.call(this.http.get<InterviewPrep>(`/applications/${id}/interview-prep`)); }
+  editSection(id: number, body: SectionEdit) {
+    return this.call(this.http.post<SectionReview>(`/documents/${id}/section`, body));
+  }
+  benchmarkCases() { return this.call(this.http.get<{ id: string; title: string }[]>('/ai/benchmark/cases')); }
+  compareProviders(body: { case_id: string; claude_key?: string; openai_key?: string; claude_model?: string;
+                          openai_model?: string; rates?: Record<string, { input: number; output: number }> }) {
+    return this.call(this.http.post<{ results: BenchmarkResult[] }>('/ai/benchmark', body));
+  }
   exampleProfile() { return this.call(this.http.get<Record<string, unknown>>('/static/fictional_profile.json')); }
 }

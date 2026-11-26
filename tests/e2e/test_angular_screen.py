@@ -321,3 +321,33 @@ def test_private_review_shows_with_an_experience_bank_and_never_prints(ui: Page)
     with ui.context.expect_page() as printed:
         ui.get_by_test_id("print-resume").click()
     expect(printed.value.locator("body")).not_to_contain_text("Private review")
+
+
+def test_technical_gap_review_generates_a_new_resume(ui: Page):
+    save_profile(ui)
+    job = ui.request.post("/jobs", data={
+        "title": "SDET", "company": "Example Shop (fictional)",
+        "description": "Required qualifications:\n- Hands-on experience with Cypress\n- Excellent communication.",
+        "required_skills": ["Cypress", "Communication"],
+    })
+    assert job.ok
+    snapshot = job.json()
+    made = ui.request.post("/applications", data={"job_id": snapshot["id"]})
+    assert made.ok
+    aid = made.json()["id"]
+    initial = ui.request.post(f"/applications/{aid}/drafts", data={"kind": "resume"})
+    assert initial.ok
+    ui.goto(f"/ui/#/applications/{aid}?tab=match")
+    panel = ui.get_by_test_id("gap-review")
+    expect(panel).to_contain_text("cypress")
+    expect(panel.get_by_role("button", name="Review example")).to_have_count(1)
+    panel.get_by_role("button", name="Review example").click()
+    panel.get_by_label("Employer or project").select_option(label="Example Corp (fictional)")
+    panel.get_by_role("textbox").fill("Built Cypress tests for the checkout flow and checked validation errors.")
+    enable = panel.get_by_role("button", name="Enable and generate resume")
+    expect(enable).to_be_disabled()
+    panel.get_by_role("checkbox").check()
+    enable.click()
+    expect(panel.get_by_role("status")).to_contain_text("verified")
+    panel.get_by_role("link", name="Open application and check resume progress").click()
+    expect(ui.get_by_test_id("status-resume")).to_contain_text("v2", timeout=30_000)

@@ -1,5 +1,7 @@
+import json
+import re
 import sqlite3
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -31,6 +33,18 @@ class SearchRequest(StrictModel):
     country: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=2)]
     date_from: date
     date_to: date
+
+
+class SaveSearch(StrictModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+    filters: SearchRequest
+
+
+class SavedSearchPreset(BaseModel):
+    id: int
+    name: str
+    filters: SearchRequest
+    last_run_at: str | None
 
 
 class SavedSearch(BaseModel):
@@ -95,23 +109,120 @@ def latest_search(conn: Conn):
 @router.post("", response_model=job_search.SearchResult, responses={422: {"description": "Bad filters"}})
 def search(body: SearchRequest, request: Request, conn: Conn):
     """Find jobs across free sources and remember the results for this workspace."""
-    code = body.country.upper()
-    if code not in job_search.COUNTRIES:
-        raise HTTPException(status_code=422, detail=f"Unknown country {body.country}.")
-    if body.date_from > body.date_to:
-        raise HTTPException(status_code=422, detail="The start date is after the end date.")
-    if (body.date_to - body.date_from).days > 92:
-        raise HTTPException(status_code=422, detail="Choose a date range of at most 3 months.")
+    result = _run_search(body, request, conn)
+    _remember_search(conn, body, result)
+    return result
+
+
+def _run_search(body: SearchRequest, request: Request, conn: sqlite3.Connection):
+    code = _check_filters(body)
     result = job_search.search(body.title, code, body.date_from, min(body.date_to, date.today()),
                                request.app.state.fetch, boards=_prefs_boards(conn),
                                request=getattr(request.app.state, "request_api", None))
+    from app import bank, core_skills, evidence
+    try:
+        profile = repository.get_profile(conn)
+    except NotFoundError:
+        profile = None
+    stated = []
+    if profile is not None:
+        terms = profile.skills + [s for g in profile.skill_groups for s in g.skills]
+        terms += [s for item in [*profile.experience, *profile.projects] for s in [*item.skills, *item.highlights]]
+        terms += [r.text for r in bank.verified(profile)]
+        stated = [(str(i), s) for i, s in enumerate(terms)]
     for j in result.results:
         row = conn.execute("SELECT id FROM jobs WHERE source_url = ?", (j.url,)).fetchone()
         j.already_added_job_id = row["id"] if row else None
-    conn.execute("INSERT OR REPLACE INTO last_job_search (id, filters, result) VALUES (1, ?, ?)",
-                 (body.model_copy(update={"country": code}).model_dump_json(), result.model_dump_json()))
-    conn.commit()
+        location = f"{j.location} {j.where}"
+        workplace = re.search(r"\b(hybrid|on[- ]site|in[- ]office|fully remote)\b", location, re.IGNORECASE)
+        if workplace:
+            mode = workplace[1].casefold()
+            j.workplace = "hybrid" if mode == "hybrid" else "remote" if mode == "fully remote" else "on-site"
+        elif j.remote:
+            j.workplace = "remote"
+        if j.description:
+            salary = re.search(
+                r"(?:salary|base pay|compensation|pay range)[: \t]{0,12}([^\n.]{0,130}[$€£]\s*\d[^\n.]{0,100})",
+                j.description, re.IGNORECASE,
+            )
+            j.salary_text = salary[1].strip() if salary else None
+        if not stated or not j.description:
+            continue
+        info = job_intake.read_with_rules(j.description, j.url)
+        ask = list(dict.fromkeys(s for s in info.required_skills if core_skills.is_listable(s)))
+        for skill in ask:
+            hit = evidence.find_part(skill, stated)
+            if hit and not hit.related:
+                j.technical_matches.append(skill)
+            elif not j.description_is_excerpt:
+                j.technical_gaps.append(skill)
     return result
+
+
+def _remember_search(conn, body, result):
+    conn.execute("INSERT OR REPLACE INTO last_job_search (id, filters, result) VALUES (1, ?, ?)",
+                 (body.model_copy(update={"country": body.country.upper()}).model_dump_json(), result.model_dump_json()))
+    conn.commit()
+
+
+def _preset(row):
+    return SavedSearchPreset(id=row["id"], name=row["name"], filters=SearchRequest.model_validate_json(row["filters"]),
+                             last_run_at=row["last_run_at"])
+
+
+@router.get("/saved", response_model=list[SavedSearchPreset])
+def saved_searches(conn: Conn):
+    return [_preset(row) for row in conn.execute("SELECT * FROM saved_searches ORDER BY name COLLATE NOCASE")]
+
+
+@router.post("/saved", response_model=SavedSearchPreset, status_code=201)
+def save_search(body: SaveSearch, conn: Conn):
+    _check_filters(body.filters)
+    filters = body.filters.model_dump_json()
+    conn.execute(
+        """INSERT INTO saved_searches (name, filters) VALUES (?, ?)
+           ON CONFLICT(name) DO UPDATE SET filters=excluded.filters,
+             seen=CASE WHEN filters=excluded.filters THEN seen ELSE '[]' END,
+             last_run_at=CASE WHEN filters=excluded.filters THEN last_run_at ELSE NULL END""",
+        (body.name, filters),
+    )
+    conn.commit()
+    return _preset(conn.execute("SELECT * FROM saved_searches WHERE name=? COLLATE NOCASE", (body.name,)).fetchone())
+
+
+@router.post("/saved/{search_id}/run", response_model=job_search.SearchResult)
+def run_saved_search(search_id: int, request: Request, conn: Conn):
+    row = conn.execute("SELECT * FROM saved_searches WHERE id=?", (search_id,)).fetchone()
+    if not row:
+        raise NotFoundError("Saved search not found.")
+    filters = SearchRequest.model_validate_json(row["filters"])
+    today = date.today()
+    filters = filters.model_copy(update={"date_from": today - (filters.date_to - filters.date_from), "date_to": today})
+    result = _run_search(filters, request, conn)
+    conn.execute("BEGIN IMMEDIATE")
+    latest = conn.execute("SELECT seen, last_run_at, filters FROM saved_searches WHERE id=?", (search_id,)).fetchone()
+    if not latest:
+        raise NotFoundError("Saved search was removed while it was running.")
+    if latest["filters"] != row["filters"]:
+        raise ConflictError("The saved filters changed while the search was running. Run the updated search again.")
+    seen = json.loads(latest["seen"])
+    lookup = set(seen)
+    for job in result.results:
+        job.new_since_last_run = bool(latest["last_run_at"] and job.url not in lookup)
+    if any(source.ok for source in result.sources):
+        seen = list(dict.fromkeys([*seen, *(job.url for job in result.results)]))[-3000:]
+        conn.execute("UPDATE saved_searches SET seen=?, last_run_at=? WHERE id=?",
+                     (json.dumps(seen), datetime.now(UTC).isoformat(), search_id))
+    _remember_search(conn, filters, result)
+    return result
+
+
+@router.delete("/saved/{search_id}")
+def delete_saved_search(search_id: int, conn: Conn):
+    if not conn.execute("DELETE FROM saved_searches WHERE id=?", (search_id,)).rowcount:
+        raise NotFoundError("Saved search not found.")
+    conn.commit()
+    return {"deleted": True}
 
 
 # --- Apify (optional, paid): structured listings from employer career sites, run in the background -----------

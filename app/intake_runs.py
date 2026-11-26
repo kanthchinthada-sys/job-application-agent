@@ -146,6 +146,9 @@ class IntakeWorker:
                 if sets:
                     conn.execute(f"UPDATE jobs SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?",
                                  (*sets.values(), job_id))
+                    if {"required_skills", "preferred_skills"} & sets.keys():
+                        from app import gap_review, repository
+                        gap_review.sync(conn, repository.get_job(conn, job_id))
                 # the model read the same value as the rules, and you haven't changed it: no need to check it
                 confirmed = [f for f in info.confirmed if f not in data["user_fields"] and now[f] == data["saved"][f]]
                 data["confirmed"] = confirmed

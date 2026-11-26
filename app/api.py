@@ -21,7 +21,7 @@ from app.config import PROJECT_ROOT, get_db_path
 from app.errors import ConflictError, NotFoundError
 from app.llm import LLMClient, LLMOutputError, LLMUnavailableError, OllamaClient
 from app import importers
-from app.routers import ai, applications, documents, importing, jobs, profile, search, submission
+from app.routers import ai, applications, documents, gaps, importing, jobs, profile, search, submission
 
 DESCRIPTION = """
 Personal job application agent. AI features use a free local Ollama model.
@@ -143,6 +143,7 @@ def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=
     app.state.ui_available = (ui_dir / "index.html").exists()
 
     app.include_router(profile.router)
+    app.include_router(gaps.router)
     app.include_router(jobs.router)
     app.include_router(applications.router)
     app.include_router(documents.router)

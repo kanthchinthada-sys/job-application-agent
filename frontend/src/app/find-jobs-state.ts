@@ -97,6 +97,19 @@ export class FindJobsState {
     }
   }
 
+  async runPreset(id: number, title: string) {
+    if (this.searching()) return;
+    this.searching.set(true);
+    this.searchError.set('');
+    try {
+      const result = await this.api.runSavedSearch(id);
+      this.setFilters({ title, country: result.country, date_from: result.date_from, date_to: result.date_to });
+      this.result.set(result);
+      this.scroll.set(0);
+    } catch (e) { this.searchError.set((e as ApiError).message); }
+    finally { this.searching.set(false); }
+  }
+
   /** Apify's settings and your latest run; a run still active is followed again (e.g. after a page reload). */
   async loadApify(restoreFilters = false) {
     try {

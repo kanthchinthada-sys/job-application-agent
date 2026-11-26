@@ -1,3 +1,4 @@
+import { GapReviewPanel } from './gap-review-panel';
 import { Component, computed, inject, OnInit, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
@@ -13,10 +14,11 @@ const STATUS_LABEL: Record<RecordStatus, string> = {
 /** The numbered experience bank: paste it, see where each record went, and confirm or exclude records. */
 @Component({
   selector: 'app-bank-panel',
-  imports: [FormsModule, MsgBox],
+  imports: [FormsModule, MsgBox, GapReviewPanel],
   template: `
     <div class="card" data-testid="bank">
       <h2>Experience bank</h2>
+      <app-gap-review-panel (changed)="ngOnInit()" />
       <p class="hint">Optional, for the best resumes: a longer list of everything you've done, one numbered record per
         line (e.g. "AB01: Built …"), under each employer's name as a heading. Every job then gets the records that fit it
         best. Records are yours, so they count as <b>verified</b>; add "(unverified)", "(partly true)" or "(not true)" to a
