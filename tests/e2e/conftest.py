@@ -21,6 +21,7 @@ playwright_sync = pytest.importorskip("playwright.sync_api", reason="pip install
 import uvicorn  # noqa: E402
 
 from app.api import create_app  # noqa: E402
+from app.career_browser import BrowserResult  # noqa: E402
 from app.llm import LLMUnavailableError  # noqa: E402
 from tests.test_importing import fake_fetch as _board_fetch  # noqa: E402
 from tests.test_submission import GH_QUESTIONS  # noqa: E402
@@ -89,10 +90,25 @@ def fake_llm_e2e():
     return E2EFakeLLM()
 
 
+class FictionalCareerBrowser:
+    def __init__(self, profile_dir):
+        pass
+
+    def run(self, application_id, target, contact, answers, files, session_key, reviewed, mark_attempt):
+        assert files["resume"]["buffer"].startswith(b"%PDF")
+        mark_attempt()
+        return BrowserResult("confirmed", "The fictional employer confirmed the submission.",
+                             evidence="Fictional confirmation", uploaded=set(files))
+
+    def close(self):
+        pass
+
+
 @pytest.fixture
 def server(tmp_path, fake_llm_e2e):
     """A fresh app per test: no state leaks between tests."""
-    app = create_app(tmp_path / "e2e.db", llm=fake_llm_e2e, fetch=fake_fetch, fetch_page=_no_pages)
+    app = create_app(tmp_path / "e2e.db", llm=fake_llm_e2e, fetch=fake_fetch, fetch_page=_no_pages,
+                     local_browser=True, career_browser_factory=FictionalCareerBrowser)
     port = _free_port()
     srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=srv.run, daemon=True)

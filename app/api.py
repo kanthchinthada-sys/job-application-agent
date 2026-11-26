@@ -8,6 +8,7 @@ never touch your real data.
 
 """
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -16,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 import sqlite3
 
-from app import auth, database, observability
+from app import auth, auto_apply, database, observability
 from app.config import PROJECT_ROOT, get_db_path
 from app.errors import ConflictError, NotFoundError
 from app.llm import LLMClient, LLMOutputError, LLMUnavailableError, OllamaClient
@@ -38,14 +39,27 @@ UI_DIR = PROJECT_ROOT / "frontend" / "dist" / "frontend" / "browser"   # output 
 
 def create_app(db_path: Path | None = None, llm: LLMClient | None = None, fetch=None,
                password: str | None = None, log_dir: Path | None = None, log_level: str = "INFO",
-               ui_dir: Path | None = None, fetch_page=None, request_api=None, accounts: bool = False) -> FastAPI:
+               ui_dir: Path | None = None, fetch_page=None, request_api=None, accounts: bool = False,
+               local_browser: bool = False, career_browser_factory=None) -> FastAPI:
     """``password``: turn on sign-in (main.py passes APP_PASSWORD). ``log_dir``: also log to a file.
     ``ui_dir``: the built Angular screen (default frontend/dist/frontend/browser), served at /ui/ if it exists."""
     db_path = Path(db_path) if db_path else get_db_path()
     observability.setup_logging(log_dir, log_level)
     database.init_db(db_path)
 
-    app = FastAPI(title="Job Application Agent", version=VERSION, description=DESCRIPTION)
+    workers = auto_apply.Workers(career_browser_factory) if career_browser_factory else auto_apply.Workers()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        try:
+            yield
+        finally:
+            workers.close()
+
+    app = FastAPI(title="Job Application Agent", version=VERSION, description=DESCRIPTION, lifespan=lifespan)
+    app.state.auto_apply_workers = workers
+    app.state.local_browser = local_browser
+    app.state.test_career_browser = career_browser_factory is not None
     app.state.db_path = db_path
     app.state.llm = llm or OllamaClient.from_env()  # tests pass a fake client
     app.state.fetch = fetch or importers.http_fetch  # tests pass a fake fetcher (no network)

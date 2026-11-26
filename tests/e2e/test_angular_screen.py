@@ -200,7 +200,9 @@ def test_resume_preview_and_print_page(ui: Page):
     import_job(ui)
     open_workspace(ui)
     generate(ui, "Resume only")
-    expect(ui.get_by_test_id("resume-summary")).to_contain_text("Job-description keyword coverage")
+    coverage = ui.get_by_test_id("resume-summary").get_by_test_id("resume-coverage")
+    expect(coverage).to_contain_text("Technical keyword coverage")
+    expect(coverage).to_contain_text("Required")
     expect(ui.frame_locator("[data-testid=resume-preview]").locator("h1")).to_be_visible()
     with ui.context.expect_page() as printed:
         ui.get_by_test_id("print-resume").click()
@@ -301,6 +303,54 @@ def test_a_gap_you_really_have_can_be_added_and_used(ui: Page):
     ui.get_by_test_id("profile-changed").get_by_role("button", name="Generate a new version").click()
     expect(ui.get_by_test_id("version")).to_contain_text("v2", timeout=30_000)
     expect(ui.get_by_test_id("attention")).not_to_contain_text("TestRail")
+
+
+def test_auto_apply_panel_submits_the_selected_version_and_refreshes_tracking(ui: Page):
+    save_profile(ui)
+    import_job(ui)
+    open_workspace(ui)
+    generate(ui, "Resume only")
+    panel = ui.get_by_test_id("auto-apply")
+    panel.locator("summary").first.click()
+    expect(panel.get_by_label("Résumé to submit")).to_be_visible()
+    expect(panel.get_by_role("button", name="Approve and submit")).to_be_enabled()
+    panel.get_by_role("button", name="Approve and submit").click()
+    expect(panel.get_by_test_id("auto-apply-status")).to_contain_text("Submitted and confirmed", timeout=20_000)
+    assert ui.request.get("/applications/1").json()["submitted_resume_id"] is not None
+    expect(panel.get_by_role("button", name="Approve and submit")).to_have_count(0)
+
+
+def test_verified_evidence_improves_a_version_and_survives_pdf_export(ui: Page):
+    save_profile(ui)
+    import_job(ui)
+    open_workspace(ui)
+    generate(ui, "Resume only")
+
+    job = ui.request.get("/jobs").json()[0]
+    assert ui.request.patch(f"/jobs/{job['id']}", data={"required_skills": ["Cypress"], "preferred_skills": []}).ok
+    profile = ui.request.get("/profile").json()
+    del profile["updated_at"]
+    record = "Built Cypress regression tests for checkout and verified the error response."
+    profile["experience_bank"] = [{"id": "EX01", "owner": profile["experience"][0]["company"],
+                                  "owner_kind": "experience", "status": "verified", "text": record}]
+    assert ui.request.put("/profile", data=profile).ok
+    ui.reload()
+
+    coverage = ui.get_by_test_id("resume-coverage")
+    expect(coverage.get_by_test_id("keyword-coverage")).to_have_text("0%")
+    coverage.get_by_text("Review technical requirements").click()
+    coverage.get_by_role("button", name="Use verified evidence").click()
+    preview = coverage.get_by_test_id("verified-evidence-preview")
+    expect(preview).to_contain_text(record)
+    expect(preview).to_contain_text("Coverage 0% → 100%")
+    expect(ui.get_by_test_id("version")).to_contain_text("v1")
+    preview.get_by_role("button", name="Save as new version").click()
+    expect(ui.get_by_test_id("version")).to_contain_text("v2")
+    expect(coverage.get_by_test_id("keyword-coverage")).to_have_text("100%")
+    coverage.get_by_role("button", name="Check exported PDF").click()
+    result = coverage.get_by_test_id("pdf-check-result")
+    expect(result).to_contain_text("1 of 1 required terms")
+    expect(result).to_contain_text("PDF text and reading order checks passed.")
 
 
 def test_private_review_shows_with_an_experience_bank_and_never_prints(ui: Page):

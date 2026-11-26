@@ -1,12 +1,14 @@
+import hashlib
+import json
 import sqlite3
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from app.dependencies import llm as account_llm
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
-from app import drafting, repository, resume_render, tailoring
+from app import ats, drafting, layout, preferences, repository, resume_match, resume_pdf_review, resume_render, tailoring
 from app.errors import ConflictError, NotFoundError
 from app.dependencies import get_connection
 from typing import Literal
@@ -149,19 +151,8 @@ def print_resume(document_id: Id, conn: Conn):
     return resume_render.render(resume, app.job_title, app.company)
 
 
-@router.get("/documents/{document_id}/pdf", responses={404: {"description": "Not found"},
-                                                       503: {"description": "No browser to make the PDF"}})
-def pdf(document_id: Id, conn: Conn, inline: bool = False):
-    """The document as a real PDF file, made here (Chromium prints the same page as Print / Save as PDF), so
-    it works in any browser, including ones that cannot open a print dialog. ?inline=1 shows it instead."""
-    from fastapi.responses import Response
-    import re as _re
+def _pdf_bytes(html: str) -> bytes:
     from app import browser as chromium
-    from fastapi import HTTPException
-    doc = repository.get_document(conn, document_id)
-    app = repository.get_application(conn, doc.application_id)
-    page = print_resume(document_id, conn)
-    html = page.body.decode() if hasattr(page, "body") else str(page)
 
     def make(b):
         pg = chromium.print_page(b, html)
@@ -171,14 +162,101 @@ def pdf(document_id: Id, conn: Conn, inline: bool = False):
         finally:
             pg.close()
     try:
-        data = chromium.run(make, timeout=60)
+        return chromium.run(make, timeout=60)
     except Exception as exc:
         raise HTTPException(503, "Could not make the PDF here (no browser available). Use Print / Save as PDF "
                                  f"instead. ({type(exc).__name__})") from exc
+
+
+@router.get("/documents/{document_id}/pdf", responses={404: {"description": "Not found"},
+                                                       503: {"description": "No browser to make the PDF"}})
+def pdf(document_id: Id, conn: Conn, inline: bool = False):
+    """Download this document as a PDF made in Chromium. Use ?inline=1 to open it in the browser."""
+    from fastapi.responses import Response
+    import re as _re
+    doc = repository.get_document(conn, document_id)
+    app = repository.get_application(conn, doc.application_id)
+    page = print_resume(document_id, conn)
+    html = page.body.decode() if hasattr(page, "body") else str(page)
+    data = _pdf_bytes(html)
     name = _re.sub(r"[^A-Za-z0-9]+", "-", f"{_KIND_NAME.get(doc.kind, 'document')}-{app.company}-v{doc.version}")
     how = "inline" if inline else "attachment"
     return Response(data, media_type="application/pdf",
                     headers={"Content-Disposition": f'{how}; filename="{name.strip("-").lower()}.pdf"'})
+
+
+def _resume_context(conn: sqlite3.Connection, document_id: int):
+    doc = repository.get_document(conn, document_id)
+    if doc.kind != "resume":
+        raise ConflictError("Choose a résumé version for a technical coverage review.")
+    resume = tailoring.TailoredResume.model_validate_json(doc.content)
+    job = repository.get_job(conn, repository.get_application(conn, doc.application_id).job_id)
+    return doc, resume, repository.get_profile(conn), job
+
+
+@router.get("/documents/{document_id}/technical-coverage", response_model=resume_match.Coverage)
+def technical_coverage(document_id: Id, conn: Conn):
+    _, resume, profile, job = _resume_context(conn, document_id)
+    return resume_match.analyze(resume, profile, job)
+
+
+class EvidenceEdit(BaseModel):
+    keyword: str = Field(min_length=1, max_length=500)
+    record_id: str = Field(pattern=r"^[A-Z]{2,5}\d{2,3}$")
+    approval: str | None = Field(None, pattern=r"^[a-f0-9]{64}$")
+
+
+@router.post("/documents/{document_id}/verified-evidence")
+def verified_evidence(document_id: Id, body: EvidenceEdit, conn: Conn):
+    """Preview an edit. Only the approval from a matching preview can save a new version."""
+    doc, resume, profile, job = _resume_context(conn, document_id)
+    before = resume_match.analyze(resume, profile, job)
+    edit = resume_match.apply_record(resume, profile, body.keyword, body.record_id, before)
+    after = resume_match.analyze(resume, profile, job)
+    ranks = {"bullet": 2, "skills": 1, "mention": 1}
+    if any(ranks.get(old.placement, 0) > ranks.get(new.placement, 0) for old, new in zip(before.rows, after.rows)):
+        raise ConflictError("This edit would remove existing technical evidence. Choose another bank record.")
+    content = resume.model_dump_json()
+    approval = hashlib.sha256(json.dumps([doc.id, body.keyword, edit.record.id, content, before.model_dump(),
+                                           after.model_dump()], sort_keys=True).encode()).hexdigest()
+    if body.approval is not None and body.approval != approval:
+        raise ConflictError("The résumé, posting, or bank evidence changed. Preview the edit again before saving.")
+
+    measured = layout.browser_measure(resume_render.render(resume, job.title, job.company))
+    pages = measured[1] if measured else None
+    warnings = []
+    if pages is None:
+        warnings.append("Page count is unavailable. Check the PDF before sending.")
+    elif pages > layout.MAX_PAGES:
+        warnings.append(f"This version prints on {pages} pages. Check the page length before sending.")
+    saved = None
+    if body.approval is not None:
+        ignore = {s.lower() for s in job.required_skills + job.preferred_skills
+                  if preferences.check_title(job.title, [s])[0] == "strong"}
+        legacy = ats.analyze(tailoring.resume_text(resume), tailoring.profile_text(profile),
+                             job.required_skills, job.preferred_skills, ignore, profile)
+        review = {"method": "verified_evidence", "edited_from_version": doc.version, "warnings": warnings,
+                  "facts_used": [edit.record.id], "ats": {"score_before": doc.review.get("ats", {}).get("score", legacy.score),
+                                                         **legacy.model_dump()}}
+        if pages is not None:
+            review["layout"] = {"measured": True, "printed_pages": pages, "estimated_pages": pages,
+                                "max_pages": layout.MAX_PAGES, "fits": pages <= layout.MAX_PAGES}
+        saved = repository.add_document(conn, doc.application_id, "resume", doc.question, content,
+                                        "user_edit", None, review, dedupe_key=approval)
+    return {"approval": approval, "keyword": body.keyword, "record_id": edit.record.id, "owner": edit.record.owner,
+            "text": edit.record.text, "replaces": edit.previous, "before": before, "after": after,
+            "printed_pages": pages, "warnings": warnings, "document": saved}
+
+
+@router.get("/documents/{document_id}/pdf-check", response_model=resume_pdf_review.PdfCheck)
+def check_pdf(document_id: Id, conn: Conn):
+    _, resume, profile, job = _resume_context(conn, document_id)
+    coverage = resume_match.analyze(resume, profile, job)
+    data = _pdf_bytes(resume_render.render(resume, job.title, job.company))
+    try:
+        return resume_pdf_review.check(data, resume, coverage)
+    except Exception as exc:
+        raise HTTPException(503, "Could not read the exported PDF text. Check the PDF manually.") from exc
 
 
 class HandoffItem(BaseModel):

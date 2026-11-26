@@ -7,6 +7,7 @@ import { Application, Doc, Job, Preparation } from '../../models';
 import { Msg, MsgBox } from '../../ui';
 import { ApplyPlan } from '../apply-plan';
 import { HandoffPanel } from '../handoff-panel';
+import { AutoApplyPanel } from './auto-apply';
 import { LetterView } from './letter-view';
 import { ResumeView } from './resume-view';
 import { SectionEditor } from './section-editor';
@@ -18,7 +19,7 @@ export const KIND_LABEL: Record<Kind, string> = { resume: 'Resume', cover_letter
  *  Opening this tab only reads what is saved: it never calls the model. */
 @Component({
   selector: 'app-documents-tab',
-  imports: [FormsModule, DatePipe, MsgBox, ResumeView, LetterView, HandoffPanel, ApplyPlan, SectionEditor],
+  imports: [FormsModule, DatePipe, MsgBox, ResumeView, LetterView, HandoffPanel, ApplyPlan, SectionEditor, AutoApplyPanel],
   template: `
     @if (excerpt(); as j) {
       <div class="card" data-testid="excerpt">
@@ -105,6 +106,8 @@ export const KIND_LABEL: Record<Kind, string> = { resume: 'Resume', cover_letter
         }
       </div>
     }
+
+    <app-auto-apply [applicationId]="application().id" [documents]="docs()" (changed)="changed.emit()" />
 
     <details class="card tools" data-testid="application-tools">
       <summary><b>Application tools</b> · screening answers, manual checklist, Greenhouse assisted plan</summary>

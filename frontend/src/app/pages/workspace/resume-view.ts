@@ -6,6 +6,7 @@ import { Api, ApiError } from '../../api';
 import { Doc } from '../../models';
 import { Msg, MsgBox } from '../../ui';
 import { ResumeCard } from '../resume-card';
+import { ResumeCoverage } from './resume-coverage';
 
 interface Bullet { text: string; original?: string; changed?: boolean; rejected_reason?: string; }
 interface Role { company: string; title: string; bullets: Bullet[]; }
@@ -14,10 +15,9 @@ interface Tailored { summary: string; experience: Role[]; [k: string]: unknown; 
 /** The resume: its printed preview and actions first, a compact summary beside it, the details below. */
 @Component({
   selector: 'app-resume-view',
-  imports: [FormsModule, MsgBox, ResumeCard],
+  imports: [FormsModule, MsgBox, ResumeCard, ResumeCoverage],
   template: `
     @let d = doc();
-    @let r = reviewDoc().review ?? {};
     <div class="actions" data-testid="resume-actions">
       @if (!editing()) {
         <button class="secondary" type="button" (click)="startEdit()">Edit</button>
@@ -56,13 +56,9 @@ interface Tailored { summary: string; experience: Role[]; [k: string]: unknown; 
               <b [class.good]="f.ok" [class.warn-text]="!f.ok" data-testid="page-fit">{{ f.text }}</b>
             } @else { <b class="muted">—</b> }
           </div>
-          <div class="stat" style="margin-top:8px"><span>Job-description keyword coverage</span>
-            <b data-testid="keyword-coverage">{{ r.ats?.compared ? r.ats.score + '%' : '—' }}</b></div>
-          <div class="small muted">How many of the technical keywords in the job description (tools, languages,
-            practices; weighted by importance) appear on this resume. People skills aren't counted. It is not a hiring
-            prediction{{ r.ats?.max_honest_score ? '; ' + r.ats.max_honest_score + '% is the most your real experience supports' : '' }}.</div>
           @if (d.source !== 'ai' && reviewDoc().id !== d.id) { <div class="small muted" style="margin-top:6px">Checks shown are from the AI draft v{{ reviewDoc().version }}; this is your edit v{{ d.version }}.</div> }
         </div>
+        <app-resume-coverage [documentId]="d.id" (saved)="saved.emit($event)" />
         <div class="panel" data-testid="attention">
           <b>Needs your attention</b>
           @if (attention().length) {
@@ -81,7 +77,8 @@ interface Tailored { summary: string; experience: Role[]; [k: string]: unknown; 
     <details class="block" data-testid="resume-details">
       <summary><b>Review details</b>: reworded bullets (original vs new), keyword evidence, requirements map, omitted
         skills, profile facts and writing notes</summary>
-      <app-resume-card [versions]="[reviewDoc()]" [working]="working()" (regenerate)="regenerate.emit()" />
+      <app-resume-card [versions]="[reviewDoc()]" [working]="working()" [showCoverageScore]="false"
+                       (regenerate)="regenerate.emit()" />
     </details>
   `,
 })

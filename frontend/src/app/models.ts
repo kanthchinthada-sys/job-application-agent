@@ -243,3 +243,88 @@ export interface BenchmarkResult {
   estimated_usd: number | null; calls: number; error?: string; summary?: string; skills?: string[];
   letter?: string; resume_warnings?: string[]; letter_warnings?: string[]; letter_removed?: number; humanizer_score?: number | null;
 }
+export interface CoverageCount {
+  total: number;
+  covered: number;
+  demonstrated: number;
+}
+
+export interface VerifiedEvidence {
+  record_id: string;
+  owner: string;
+  text: string;
+}
+
+export interface TechnicalRequirement {
+  keyword: string;
+  required: boolean;
+  placement: 'bullet' | 'skills' | 'mention' | 'verified' | 'profile' | 'transferable' | 'gap';
+  evidence: string | null;
+  owner: string | null;
+  options: VerifiedEvidence[];
+}
+
+export interface TechnicalCoverage {
+  score: number | null;
+  required: CoverageCount;
+  preferred: CoverageCount;
+  rows: TechnicalRequirement[];
+}
+
+export interface EvidencePreview extends VerifiedEvidence {
+  approval: string;
+  keyword: string;
+  replaces: string | null;
+  before: TechnicalCoverage;
+  after: TechnicalCoverage;
+  printed_pages: number | null;
+  warnings: string[];
+  document: Doc | null;
+}
+
+export interface ResumePdfCheck {
+  readable: boolean;
+  required_found: string[];
+  required_missing: string[];
+  issues: string[];
+}
+export interface AutoApplyQuestion {
+  key: string;
+  label: string;
+  options: string[];
+  manual: boolean;
+  draftable: boolean;
+}
+
+export interface AutoApplyRun {
+  state: string;
+  message: string;
+  questions: AutoApplyQuestion[];
+  resume_id: number | null;
+  cover_letter_id: number | null;
+  evidence: string | null;
+}
+
+export interface AutoApplySetup {
+  supported: boolean;
+  reason?: string;
+  provider?: string;
+  url?: string;
+  preview?: string;
+  job_title?: string;
+  company?: string;
+  contact?: Record<string, string>;
+  saved_answers?: { name: string; label: string; value: string }[];
+  materials?: Pick<Doc, 'id' | 'version' | 'kind'>[];
+  run?: AutoApplyRun;
+  blocked?: boolean;
+  can_set_portal?: boolean;
+}
+
+export interface AutoApplyApproval {
+  preview: string;
+  resume_id: number;
+  cover_letter_id: number | null;
+  answers: Record<string, string>;
+  reviewed_in_browser: boolean;
+}

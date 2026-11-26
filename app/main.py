@@ -21,7 +21,8 @@ from app.api import create_app  # noqa: E402
 
 _accounts = os.environ.get("JOB_AGENT_ACCOUNTS", "on").strip().lower() not in ("off", "0", "false", "no")
 app = create_app(password=None if _accounts else get_password(), log_dir=LOG_DIR,
-                 log_level=os.environ.get("LOG_LEVEL", "INFO"), accounts=_accounts)
+                 log_level=os.environ.get("LOG_LEVEL", "INFO"), accounts=_accounts,
+                 local_browser=os.environ.get("JOB_AGENT_AUTO_APPLY", "on").lower() not in {"off", "0", "false"})
 _port = os.environ.get("PORT", "8000")
 print(f"\n  Job Application Agent is running. Open:  http://127.0.0.1:{_port}/ui/\n", flush=True)
 if _accounts and (_code := app.state.accounts.setup_code()):

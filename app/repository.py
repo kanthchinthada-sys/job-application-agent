@@ -299,10 +299,19 @@ def _row_to_document(row: sqlite3.Row) -> DocumentOut:
 
 
 def add_document(conn, application_id: int, kind: str, question: str, content: str,
-                 source: str, model: str | None, review: dict) -> DocumentOut:
+                 source: str, model: str | None, review: dict, *, dedupe_key: str | None = None) -> DocumentOut:
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         get_application(conn, application_id)  # 404 if missing
+        if dedupe_key is not None:
+            duplicate = conn.execute(
+                """SELECT * FROM documents WHERE application_id = ? AND kind = ? AND question = ?
+                   AND json_extract(review, '$.dedupe_key') = ? LIMIT 1""",
+                (application_id, kind, question, dedupe_key),
+            ).fetchone()
+            if duplicate is not None:
+                return _row_to_document(duplicate)
+            review = {**review, "dedupe_key": dedupe_key}
         row = conn.execute(
             "SELECT COALESCE(MAX(version), 0) AS v FROM documents WHERE application_id = ? AND kind = ? AND question = ?",
             (application_id, kind, question),

@@ -103,6 +103,21 @@ CREATE TABLE IF NOT EXISTS application_details (
     submitted_cover_letter_id INTEGER REFERENCES documents(id)
 );
 
+-- A durable claim on an employer posting. A recorded submit attempt is never retried automatically.
+CREATE TABLE IF NOT EXISTS auto_apply_runs (
+    application_id INTEGER PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
+    target_key TEXT NOT NULL UNIQUE,
+    run_token TEXT NOT NULL,
+    state TEXT NOT NULL,
+    data TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS application_portal_links (
+    application_id INTEGER PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
+    url TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS saved_searches (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE COLLATE NOCASE,

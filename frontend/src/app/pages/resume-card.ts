@@ -39,10 +39,12 @@ interface TailoredResume { summary: string; summary_source?: string; skills: str
           </div>
         } @else {
         <div class="ats">
+          @if (showCoverageScore()) {
           <b>Job-description keyword coverage: {{ ats.score }}%</b>
           <span class="muted small">(the share of the job description's technical keywords that appear on the resume, as an
             applicant tracking system scans it; was {{ ats.score_before }}% before adding keywords; {{ ats.max_honest_score }}%
             is the most your real experience supports)</span>
+          }
           @if (ats.matched?.length) {
             <details data-testid="ats-matched"><summary>Found on the resume ({{ ats.matched.length }}): where an ATS sees each one</summary>
               @for (k of ats.matched; track k.keyword) {
@@ -305,6 +307,7 @@ export class ResumeCard {
 
   /** All versions of the resume, newest first. */
   readonly versions = input.required<Doc[]>();
+  readonly showCoverageScore = input(true);
 
   protected readonly latest = computed(() => this.versions()[0]);
   protected readonly resume = computed(() => JSON.parse(this.latest().content) as TailoredResume);

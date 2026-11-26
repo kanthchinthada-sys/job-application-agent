@@ -2,8 +2,8 @@
 
 A free, private job-search assistant that runs on your own computer. Upload your resume once; then **find jobs**
 by title, country and date, and for each one get a **resume tailored to that job (exactly two pages)**, a
-**cover letter**, and an **ATS keyword check**. Everything it writes is checked against your real experience: it
-never invents qualifications, and it never submits an application for you.
+**cover letter**, and an **ATS keyword check**. It checks drafts against your experience. On supported career
+sites, Auto-apply can fill and submit an individual application after you review and approve it.
 
 Runs locally: FastAPI + SQLite + an Angular screen. The AI is your choice per account: **Claude** or **OpenAI**
 with your own API key (Profile > AI provider; faster and better writing, billed by the provider per use), or the
@@ -84,9 +84,12 @@ If the local AI is not running, the header shows "AI offline" with how to reconn
   - **Documents:** one **Generate resume and cover letter** button (or one document at a time) with real progress
     per document. A refresh or a double click never starts a second run; a failed document can be retried alone.
     Each document opens with its preview and actions first (Edit, Copy, Download .txt, **Print / Save as PDF**,
-    Save edits as new version), a compact summary beside it (page fit, **job-description keyword coverage**, what
-    needs your attention, and claims left out because your profile doesn't support them), and the details folded
-    below. Pick any saved version. When you add evidence after a draft, it says "Profile updated since this draft".
+    Save edits as new version), a compact summary beside it, and the details folded below. **Technical keyword
+    coverage** shows required and preferred terms separately, with counts for terms demonstrated in work or
+    project bullets. Open **Review technical requirements** and choose **Use verified evidence** to preview an
+    existing record, its placement, and the score change before saving a new version. **Check exported PDF**
+    checks the text, section headings, and dated roles in the PDF the app generates. Pick any saved version.
+    When you add evidence after a draft, it says "Profile updated since this draft".
     Screening answers, the manual checklist and the Greenhouse assisted plan are under **Application tools**.
   - **Job & skill match:** each requirement with direct evidence, related experience or a gap; open one to see the
     employer and experience record behind it, or add what you have with "I have …".
@@ -425,13 +428,32 @@ of them is there). Keywords nothing supports are reported as **gaps**, never add
   You can use your saved key for its provider and enter the other key for that run. The comparison makes paid
   API calls. Enter per-million-token rates to estimate cost from measured input and output tokens.
 
-- `GET /applications/{id}/handoff`: checklist, posting link, latest resume / cover letter / answers and your
-  details to copy, for applying by hand. The agent never submits.
+- `GET /applications/{id}/handoff`: checklist, posting link, latest materials, and your details for applying by hand.
 - Status rules: an application can't move backwards past a submission (e.g. `submitted_confirmed` →
   `preparing`), can only be `rejected` after a submission attempt, and `rejected` is final. Each application
   reports `allowed_next`; `submitted_confirmed` needs confirmation evidence.
 
-## Assisted apply on Greenhouse (Milestone 4)
+## Auto-apply from the local app
+
+1. Save a direct Greenhouse, Lever, Ashby, or Workday posting. If you saved the job from an aggregator or
+   pasted the description, enter the official employer URL under **Direct employer application link**.
+   Open the application and generate a tailored résumé.
+2. In **Documents → Auto-apply**, review the posting, the profile information, and the exact résumé and optional
+   cover letter versions. Select **Approve and submit**. The app opens a visible, dedicated Chromium browser on
+   your computer and handles recognized fields and PDF uploads.
+3. The browser profile remembers sign-ins within your local workspace. Complete account creation, sign-in,
+   verification, CAPTCHA, and consent in the employer browser when the run pauses. Answer custom questions in
+   the app or on the employer's site. For eligible written questions, **Draft answer with AI** uses your configured
+   provider so you can check its answer. Review Workday's final page, then select **Approve answers and resume auto-apply**.
+4. The app submits once and records the exact documents after it sees a confirmation. If the result is uncertain,
+   check the employer portal or email. **Stop auto-apply** is available before the final submission starts.
+
+Auto-apply runs through the employer's hosted form. Available fields and login flows vary by employer. Alternate
+or unfamiliar forms may need manual completion. The feature is available over loopback and uses the installed
+Playwright Chromium. Set `JOB_AGENT_AUTO_APPLY=off` to hide it. The browser profile and run history stay in the
+workspace's private data folder. Automated tests use fictional forms and submissions.
+
+## Assisted apply on Greenhouse
 
 For jobs with a Greenhouse link, **Applications → Materials → Assisted apply (Greenhouse): prepare plan**:
 
@@ -628,7 +650,7 @@ Plain `python -m pytest` runs only the fast API/unit tests (e2e tests are opt-in
 
 - Reading a job from its link alone works for Greenhouse, Lever and Ashby; other sites need the description pasted.
 - Find jobs covers the free sources above; without a JSearch, Adzuna or Jooble key, most results are remote jobs or from The Muse.
-- Assisted apply supports Greenhouse only; Lever/Ashby jobs use the apply-by-hand checklist. You always click Submit.
+- The older assisted-apply command supports Greenhouse. The local Auto-apply panel can submit supported hosted forms.
 - Password protection is single-user; sessions are kept in memory, so a restart signs you out.
 - The local 8B model is slower and writes less fluently than large cloud models; always review drafts.
 - Schema changes currently need a fresh database; migrations come with PostgreSQL.

@@ -5,7 +5,8 @@ import { firstValueFrom, Observable } from 'rxjs';
 import {
   AIMatchReport, AiSettings, AiStatus, Application, BankImportReport, BankRecord, RecordStatus, BoardSearch, Doc, ExtractedSkills, Handoff, Health, ImportedJob, Job, MatchReport,
   NewJob, QuickAdd, ResumeImport, CountryOption, SearchResult, FoundJob, ApplyResult, ApifyRun, ApifySettings, Preparation, Me, Requirements,
-  Activity, IntakeStatus, GapSuggestion, SearchFilters, SearchPreset, InterviewPrep, SectionEdit, SectionReview, BenchmarkResult } from './models';
+  Activity, IntakeStatus, GapSuggestion, SearchFilters, SearchPreset, InterviewPrep, SectionEdit, SectionReview, BenchmarkResult,
+  TechnicalCoverage, EvidencePreview, ResumePdfCheck, AutoApplySetup, AutoApplyRun, AutoApplyApproval } from './models';
 
 /** An error from the backend, with its readable message (FastAPI's "detail"). */
 export class ApiError extends Error {
@@ -110,6 +111,17 @@ export class Api {
   saveVersion(docId: number, content: string) {
     return this.call(this.http.post<Doc>(`/documents/${docId}/versions`, { content }));
   }
+  technicalCoverage(docId: number) {
+    return this.call(this.http.get<TechnicalCoverage>(`/documents/${docId}/technical-coverage`));
+  }
+  useVerifiedEvidence(docId: number, keyword: string, recordId: string, approval?: string) {
+    return this.call(this.http.post<EvidencePreview>(`/documents/${docId}/verified-evidence`, {
+      keyword, record_id: recordId, approval,
+    }));
+  }
+  checkResumePdf(docId: number) {
+    return this.call(this.http.get<ResumePdfCheck>(`/documents/${docId}/pdf-check`));
+  }
   preparation(appId: number) { return this.call(this.http.get<Preparation>(`/applications/${appId}/prepare`)); }
   prepare(appId: number, steps?: string[]) {
     return this.call(this.http.post<Preparation>(`/applications/${appId}/prepare`, steps ? { steps } : {}));
@@ -120,6 +132,21 @@ export class Api {
   preparePlan(appId: number) { return this.call(this.http.post<Doc>(`/applications/${appId}/submission/plan`, {})); }
   approvePlan(appId: number, answers: Record<string, string>) {
     return this.call(this.http.post<Doc>(`/applications/${appId}/submission/approve`, { answers }));
+  }
+  autoApplySetup(appId: number) {
+    return this.call(this.http.get<AutoApplySetup>(`/applications/${appId}/auto-apply`));
+  }
+  setAutoApplyPortal(appId: number, url: string) {
+    return this.call(this.http.put<AutoApplySetup>(`/applications/${appId}/auto-apply/portal`, { url }));
+  }
+  autoApply(appId: number, approval: AutoApplyApproval) {
+    return this.call(this.http.post<AutoApplyRun>(`/applications/${appId}/auto-apply`, approval));
+  }
+  cancelAutoApply(appId: number) {
+    return this.call(this.http.post<AutoApplyRun>(`/applications/${appId}/auto-apply/cancel`, {}));
+  }
+  reviewAutoApply(appId: number) {
+    return this.call(this.http.post<AutoApplyRun>(`/applications/${appId}/auto-apply/review`, { verified_not_received: true }));
   }
 
   profile() { return this.call(this.http.get<Record<string, unknown>>('/profile')); }

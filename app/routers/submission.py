@@ -2,13 +2,14 @@
 
 import json
 import sqlite3
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Path, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, StringConstraints
 
-from app import repository, resume_render, submission
-from app.dependencies import get_connection
+from app import auto_apply, repository, resume_render, submission
+from app.dependencies import db_path, get_connection
 from app.errors import ConflictError, NotFoundError
 from app.schemas import ApplicationOut, ApplicationStatus, ApplicationUpdate, DocumentOut
 
@@ -77,7 +78,10 @@ def approve_plan(application_id: Id, edit: submission.PlanEdit, conn: Conn):
 @router.get("/applications/{application_id}/submission/ready")
 def ready_to_fill(application_id: Id, conn: Conn):
     """Used by the fill script: the approved plan, after the duplicate check."""
+    run = auto_apply.assert_no_active_run(conn, application_id)
     app = repository.get_application(conn, application_id)
+    if run.state in {"uncertain", "already_applied", "confirmed"}:
+        raise ConflictError("Check the previous outcome in Auto-apply before opening the form again.")
     submission.guard_not_submitted(app)
     _, plan = _latest_plan(conn, application_id)
     if not plan.approved:
@@ -92,6 +96,7 @@ def ready_to_fill(application_id: Id, conn: Conn):
              responses={409: {"description": "Invalid outcome for the current state"}})
 def record_result(application_id: Id, report: submission.OutcomeReport, conn: Conn):
     """What happened in the browser. Only a seen confirmation becomes 'submitted_confirmed'."""
+    auto_apply.assert_no_active_run(conn, application_id)
     app = repository.get_application(conn, application_id)
     status = submission.outcome_to_status(report.outcome)
     note = f"Assisted apply: {report.outcome}" + (f" ({report.details})" if report.details else "")
@@ -105,6 +110,64 @@ def record_result(application_id: Id, report: submission.OutcomeReport, conn: Co
             status=ApplicationStatus.submission_attempted, event_note="Submit clicked in the browser"))
     return repository.update_application(conn, application_id, ApplicationUpdate(
         status=status, submission_confirmation=report.evidence or None, event_note=note))
+
+
+def _local_browser(request: Request) -> bool:
+    if request.app.state.test_career_browser and request.client and request.client.host == "testclient":
+        return True
+    if not request.app.state.local_browser or not request.client:
+        return False
+    loopback = {"localhost", "127.0.0.1", "::1"}
+    origin = request.headers.get("origin")
+    return (request.client.host in loopback and request.url.hostname in loopback
+            and (not origin or origin == f"{request.url.scheme}://{request.url.netloc}"))
+
+
+@router.get("/applications/{application_id}/auto-apply")
+def automatic_setup(application_id: Id, request: Request, conn: Conn):
+    if not _local_browser(request):
+        return {"supported": False, "reason": "Auto-apply is available from the app on your local computer."}
+    return auto_apply.setup(conn, application_id)
+
+
+class PortalLink(BaseModel):
+    url: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+
+
+@router.put("/applications/{application_id}/auto-apply/portal")
+def automatic_portal(application_id: Id, body: PortalLink, request: Request, conn: Conn):
+    if not _local_browser(request):
+        raise HTTPException(403, "Auto-apply is available from the app on your local computer.")
+    return auto_apply.save_portal(conn, application_id, body.url)
+
+
+@router.post("/applications/{application_id}/auto-apply", response_model=auto_apply.Run, status_code=202)
+def automatic_submit(application_id: Id, body: auto_apply.Approval, request: Request, conn: Conn):
+    """Start or continue the approved local browser run for this exact application and document versions."""
+    if not _local_browser(request):
+        raise HTTPException(403, "Auto-apply is available from the app on your local computer.")
+    run, token = auto_apply.enqueue(conn, application_id, body)
+    if token:
+        request.app.state.auto_apply_workers.submit(db_path(request), application_id, token)
+    return run
+
+
+@router.post("/applications/{application_id}/auto-apply/cancel", response_model=auto_apply.Run)
+def automatic_cancel(application_id: Id, request: Request, conn: Conn):
+    if not _local_browser(request):
+        raise HTTPException(403, "Auto-apply is available from the app on your local computer.")
+    return auto_apply.cancel(conn, application_id)
+
+
+class SubmissionReviewed(BaseModel):
+    verified_not_received: Literal[True]
+
+
+@router.post("/applications/{application_id}/auto-apply/review", response_model=auto_apply.Run)
+def automatic_review(application_id: Id, body: SubmissionReviewed, request: Request, conn: Conn):
+    if not _local_browser(request):
+        raise HTTPException(403, "Auto-apply is available from the app on your local computer.")
+    return auto_apply.clear_unreceived(conn, application_id)
 
 
 @router.get("/applications/{application_id}/cover-letter", response_class=HTMLResponse,
