@@ -122,3 +122,47 @@ def test_provider_benchmark_reuses_only_the_matching_saved_key(client, db_path, 
     assert all(r["summary"] and r["letter"] for r in results.values())
     assert "fake-openai-benchmark-key" not in response.text
     assert ai_settings.load(db_path)["provider"] == "claude"
+
+
+def test_gaps_are_worked_out_for_a_job_saved_before_they_could_be(client, profile_data, make_job, db_path):
+    import sqlite3
+    # saved before gap review ran for it (here: before the profile existed, so there was nothing to compare)
+    job = make_job(title="SDET", description="Required qualifications:\n- Hands-on experience with Cypress",
+                   required_skills=["Cypress"], preferred_skills=[])
+    assert job.get("pending_technical_gaps", 0) == 0
+    client.put("/profile", json=profile_data).raise_for_status()
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM gap_suggestions").fetchone()[0] == 0
+    # opening the job's application works them out once, so the banner and the review panel show
+    assert client.get(f"/jobs/{job['id']}").json()["pending_technical_gaps"] == 1
+    assert [g["skill"].lower() for g in client.get("/experience-gaps", params={"job_id": job["id"]}).json()] == ["cypress"]
+
+
+def test_gap_prompts_keep_the_postings_spelling_and_say_what_would_count():
+    from types import SimpleNamespace
+    from app import gap_review
+    job = SimpleNamespace(required_skills=["DevSecOps", "incident response"], preferred_skills=[],
+                          description="Experience with DevSecOps and incident response.")
+    assert gap_review._label("devsecops", job) == "DevSecOps"
+    assert gap_review._label("incident response", job) == "Incident response"          # as a heading
+    assert gap_review._label("incident response", job, heading=False) == "incident response"
+    example = gap_review._example("incident response", "incident response")
+    assert example.startswith("Draft only if true: Handled incident response for [system]")
+    assert "complete a specific technical task" not in gap_review._example("scala", "Scala")
+
+
+def test_combined_skills_are_checked_part_by_part():
+    from app import gap_review
+    assert gap_review._parts("Docker/GitHub Actions/Azure") == ["Docker", "GitHub Actions", "Azure"]
+    assert gap_review._parts("version control (Git)") == ["Git"]
+    assert gap_review._parts("CI/CD") == ["CI/CD"]
+
+
+def test_a_skill_the_match_table_found_is_not_a_gap(client, profile_data, make_job):
+    profile_data = {**profile_data, "skills": [*profile_data.get("skills", []), "JUnit"]}
+    client.put("/profile", json=profile_data).raise_for_status()
+    job = make_job(title="SDET", description="Required qualifications:\n- Experience with TestNG/JUnit and Cypress",
+                   required_skills=["TestNG/JUnit", "Cypress"], preferred_skills=[])
+    skills = [g["skill"] for g in client.get("/experience-gaps", params={"job_id": job["id"]}).json()]
+    assert "Cypress" in skills                                   # missing, spelled as the posting spells it
+    assert not any("TestNG" in s or "JUnit" in s for s in skills)   # either one meets it, and JUnit is there

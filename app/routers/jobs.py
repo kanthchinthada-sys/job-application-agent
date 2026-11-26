@@ -186,7 +186,10 @@ def list_jobs(conn: Conn):
 
 @router.get("/{job_id}", response_model=JobOut, responses={404: {"description": "Job not found"}})
 def get_job(job_id: JobId, conn: Conn):
-    return repository.get_job(conn, job_id)
+    from app import gap_review
+    job = repository.get_job(conn, job_id)
+    # a job saved before technical gap review existed: work out its gaps now, so they show on its application
+    return repository.get_job(conn, job_id) if gap_review.ensure(conn, job) else job
 
 
 @router.get(

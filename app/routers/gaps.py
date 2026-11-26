@@ -23,6 +23,9 @@ class ConfirmGap(StrictModel):
 
 @router.get("/experience-gaps")
 def list_gaps(conn: Conn, job_id: int | None = None):
+    if job_id is not None:
+        from app import repository
+        gap_review.ensure(conn, repository.get_job(conn, job_id))
     return gap_review.list_suggestions(conn, job_id)
 
 

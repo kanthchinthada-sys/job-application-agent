@@ -15,9 +15,96 @@ _EXAMPLE = {
     "Languages": "implement a specific test, utility, or service change",
 }
 
+# Skills with no category above: a concrete draft to adapt, so the prompt says what kind of work would count.
+# {label} is the posting's own spelling; every draft names the skill, so an edited draft still shows it.
+_DRAFTS = {
+    "incident response": "Handled {label} for [system]: triaged [alert or report], found the root cause in "
+                         "[component], and restored service in [time]",
+    "compliance": "Produced {label} evidence for [regulation or standard] on [system], such as [audit records, "
+                  "access controls, or test results]",
+    "devsecops": "Added {label} checks ([dependency, image, or secret] scanning) to the [CI/CD tool] pipeline for "
+                 "[system], which caught [issue]",
+    "ai agents": "Built or tested {label} in [system or project] that call [tools or APIs] to [task], and checked "
+                 "[behavior or result]",
+    "distributed systems": "Tested or debugged {label} in [system]: [queues, retries, replication, or failover], "
+                           "and found [result]",
+    "observability": "Added {label} to [system] with [metrics, logs, or traces in which tool], which found [problem]",
+    "microservices": "Built, tested, or debugged {label} in [system] that call each other through [APIs or "
+                     "messaging], and [result]",
+    "security testing": "Ran {label} on [system] with [tool or method], found [issue], and verified the fix",
+    "performance testing": "Ran {label} on [system] with [tool] at [load], found [bottleneck], and [result]",
+}
+
+
+# Which jobs have had their gaps worked out, and by which version of the review. A job saved before gap review
+# existed (or reviewed by an older version) is reviewed again the first time it is opened (ensure); it takes under
+# a second. Raise REVIEW_VERSION when the rules or the prompts change.
+REVIEW_VERSION = 2
+_RUNS = """CREATE TABLE IF NOT EXISTS gap_review_runs (
+    job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE, synced_at TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1)"""
+
+
+def _runs_table(conn: sqlite3.Connection) -> None:
+    conn.execute(_RUNS)
+    if "version" not in {row[1] for row in conn.execute("PRAGMA table_info(gap_review_runs)")}:
+        conn.execute("ALTER TABLE gap_review_runs ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+
+
+def ensure(conn: sqlite3.Connection, job) -> bool:
+    """Work out this job's technical gaps if that was never done with the current review. True if it ran."""
+    _runs_table(conn)
+    if conn.execute("SELECT 1 FROM gap_review_runs WHERE job_id=? AND version>=?",
+                    (job.id, REVIEW_VERSION)).fetchone():
+        return False
+    sync(conn, job)
+    conn.commit()
+    return True
+
 
 def _key(skill: str) -> str:
     return evidence.normalize(skill.casefold())
+
+
+def _label(skill: str, job, requirement: str = "", heading: bool = True) -> str:
+    """The skill as the posting spells it ("DevSecOps", "AI agents"), not the lowercase matching form. As a heading
+    a lowercase term starts with a capital ("Incident response"); inside a sentence it stays as written."""
+    shown = core_skills.display(skill)
+    if shown != shown.lower():
+        return shown
+    for name in [*job.required_skills, *job.preferred_skills]:
+        if _key(name) == _key(skill) and name != name.lower():
+            return name
+    m = re.search(rf"\b{re.escape(shown)}\b", f"{requirement}\n{job.description or ''}", re.IGNORECASE)
+    if m and m.group(0) != m.group(0).lower():
+        return m.group(0)
+    return shown[:1].upper() + shown[1:] if heading else shown
+
+
+def _example(skill: str, label: str) -> str:
+    """A draft to adapt, only if it is true: concrete enough to show what kind of work would count."""
+    category = core_skills.category_of(skill)
+    if category in _EXAMPLE:
+        body = (f"Used {label} to {_EXAMPLE[category]} for [system or project], checked [specific behavior or data], "
+                "and observed [actual result]")
+    elif _key(skill) in _DRAFTS:
+        body = _DRAFTS[_key(skill)].format(label=label)
+    else:
+        body = f"Used {label} to [build, test, or fix what] in [system or project], and [the result you saw]"
+    return f"Draft only if true: {body}."
+
+
+def _parts(name: str) -> list[str]:
+    """A combined skill from the posting's list, checked part by part: "Docker/GitHub Actions/Azure" is three
+    skills, and "version control (Git)" is Git. A known term with a slash ("CI/CD") stays whole."""
+    if any(_key(term) == _key(name) for _, _, term in find_terms(name)):
+        return [name]
+    if m := re.fullmatch(r"\s*(.+?)\s*\((.+)\)\s*", name):
+        return _parts(m.group(2)) if _is_technical(m.group(2)) else _parts(m.group(1))
+    parts = [x.strip() for x in name.split("/") if x.strip()]
+    if len(parts) > 1 and all(len(x) > 2 for x in parts):
+        return [x for part in parts for x in _parts(part)]
+    return [name]
 
 
 def _is_technical(skill: str) -> bool:
@@ -44,8 +131,34 @@ def sync(conn: sqlite3.Connection, job) -> None:
         for _, _, term in find_terms(text):
             if category := core_skills.category_of(term):
                 by_category.setdefault(category, owner)
+    stated = [(str(i), s) for i, s in enumerate(
+        profile.skills + [x for group in profile.skill_groups for x in group.skills]
+        + [x for owner in [*profile.experience, *profile.projects] for x in [*owner.highlights, *owner.skills]]
+        + [r.text for r in records.values()]
+    )]
+    # what the match table already found in your records ("Kubernetes, distributed systems, and APIs": all three)
+    covered = {_key(part) for row in plan.rows for part in [*row.found_parts, *row.found_elsewhere]}
+
+    def have(name: str) -> bool:
+        return _key(name) in covered or bool((hit := evidence.find_part(_key(name), stated)) and not hit.related)
+
     pending = {}
     alternatives = set()
+    # "TestNG/JUnit", "Power BI/Databricks": either one meets it, so none is a gap when you have one of them
+    either = [[_key(x) for x in _parts(listed)] for listed in [*job.required_skills, *job.preferred_skills]]
+    for row in plan.rows:
+        for group in re.findall(r"[\w.+#-]+(?:\s*/\s*[\w.+#-]+)+", row.requirement):
+            either.append([_key(x) for x in group.split("/") if x.strip()])
+    either = [group for group in either if len(group) > 1]
+
+    def add(name: str, requirement: str, owner) -> None:
+        for part in [x for x in _parts(name) if _is_technical(x)]:
+            key = _key(part)
+            if any(key in group and any(have(other) for other in group if other != key) for group in either):
+                continue
+            if key not in alternatives and not selection._ANY_OF.search(part) and not have(part):
+                pending.setdefault(key, (requirement, owner))
+
     for row in plan.rows:
         if row.category != "technical":
             continue
@@ -57,37 +170,27 @@ def sync(conn: sqlite3.Connection, job) -> None:
             continue
         suggested_owner = next((records[rid].owner for rid in row.selected_ids if rid in records), None)
         for name in row.not_found_parts:
-            if _is_technical(name):
-                pending.setdefault(_key(name), (row.requirement, suggested_owner))
-    for name in [*job.required_skills, *job.preferred_skills]:
-        skill = _key(name)
-        if skill not in alternatives and _is_technical(name) and not selection._ANY_OF.search(name):
-            pending.setdefault(skill, (name, None))
-    stated = [(str(i), s) for i, s in enumerate(
-        profile.skills + [x for group in profile.skill_groups for x in group.skills]
-        + [x for owner in [*profile.experience, *profile.projects] for x in [*owner.highlights, *owner.skills]]
-        + [r.text for r in records.values()]
-    )]
-    for skill in list(pending):
-        if (hit := evidence.find_part(skill, stated)) and not hit.related:
-            pending.pop(skill)
+            add(name, row.requirement, suggested_owner)
+    for listed in [*job.required_skills, *job.preferred_skills]:
+        add(listed, listed, None)
     for skill, (requirement, owner) in pending.items():
-        label = core_skills.display(skill)
-        category = core_skills.category_of(skill)
-        owner = owner or by_category.get(category)
-        action = _EXAMPLE.get(category, "complete a specific technical task")
-        example = (f"Draft only if true: Used {label} to {action} for [system or project], "
-                   "checked [specific behavior or data], and observed [actual result].")
+        label = _label(skill, job, requirement)
+        owner = owner or by_category.get(core_skills.category_of(skill))
+        example = _example(skill, _label(skill, job, requirement, heading=False))
         conn.execute(
             """INSERT INTO gap_suggestions (job_id, skill, requirement, owner_hint, example)
                VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(job_id, skill) DO UPDATE SET
+               ON CONFLICT(job_id, skill) DO UPDATE SET skill=excluded.skill,
                  requirement=excluded.requirement, owner_hint=excluded.owner_hint, example=excluded.example""",
             (job.id, label, requirement, owner, example),
         )
     for row in conn.execute("SELECT id, skill FROM gap_suggestions WHERE job_id=? AND state='pending'", (job.id,)):
         if _key(row["skill"]) not in pending:
             conn.execute("DELETE FROM gap_suggestions WHERE id=?", (row["id"],))
+    from datetime import datetime, timezone
+    _runs_table(conn)
+    conn.execute("INSERT OR REPLACE INTO gap_review_runs (job_id, synced_at, version) VALUES (?, ?, ?)",
+                 (job.id, datetime.now(timezone.utc).isoformat(), REVIEW_VERSION))
 
 
 def list_suggestions(conn, job_id: int | None = None) -> list[dict]:
