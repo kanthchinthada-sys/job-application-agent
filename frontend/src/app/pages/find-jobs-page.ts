@@ -227,7 +227,11 @@ export class FindJobsPage implements OnInit, OnDestroy {
   }
 
   protected async removePreset(preset: SearchPreset) {
-    try { await this.api.deleteSavedSearch(preset.id); await this.loadPresets(); }
+    try {
+      await this.api.deleteSavedSearch(preset.id);
+      this.presetMessage.set('Saved search removed.');
+      await this.loadPresets();
+    }
     catch (e) { this.presetMessage.set((e as ApiError).message); }
   }
 

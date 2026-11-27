@@ -8,7 +8,7 @@ from app.dependencies import llm as account_llm
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from app import ats, drafting, layout, preferences, repository, resume_match, resume_pdf_review, resume_render, tailoring
+from app import drafting, layout, repository, resume_match, resume_pdf_review, resume_render, tailoring
 from app.errors import ConflictError, NotFoundError
 from app.dependencies import get_connection
 from typing import Literal
@@ -51,7 +51,10 @@ def _make_draft(conn, llm, application_id: int, kind: str, question: str = "", p
     job = job or repository.get_job(conn, app.job_id)
     profile = repository.get_profile(conn)
     if kind == "resume":
-        content, review = tailoring.tailor(llm, profile, job, plan=plan)
+        from app import gap_review
+
+        content, review = tailoring.tailor(llm, profile, job, plan=plan,
+                                           confirmed_gap_ids=gap_review.approved_record_ids(conn, job.id))
         return repository.add_document(conn, application_id, "resume", "", content, "ai", llm.model, review)
     text, draft_review = drafting.draft(llm, profile, job, kind, question, plan=plan, legacy=legacy)
     return repository.add_document(conn, application_id, kind, question, text, "ai", llm.model, draft_review.model_dump())
@@ -90,14 +93,24 @@ def list_documents(application_id: Id, conn: Conn):
 def save_edit(document_id: Id, body: DocumentEdit, conn: Conn):
     """Save your edited text as a new version. The previous version is kept."""
     doc = repository.get_document(conn, document_id)
+    content = body.content
+    page_fit = None
     if doc.kind == "resume":
         try:
-            tailoring.TailoredResume.model_validate_json(body.content)
+            resume = tailoring.TailoredResume.model_validate_json(content)
         except ValidationError as exc:
             raise ConflictError("A resume version must be valid tailored-resume JSON.") from exc
+        profile = repository.get_profile(conn)
+        if profile.resume_settings.strict_layout:
+            app = repository.get_application(conn, doc.application_id)
+            page_fit = layout.fit_strict(resume, profile, lambda r: resume_render.render(r, app.job_title, app.company),
+                                         allow_trim=False)
+            content = resume.model_dump_json()
     review = {"method": "user_edit", "edited_from_version": doc.version, "facts_used": [], "warnings": [],
               "questions_for_you": []}
-    return repository.add_document(conn, doc.application_id, doc.kind, doc.question, body.content,
+    if page_fit:
+        review["layout"] = page_fit
+    return repository.add_document(conn, doc.application_id, doc.kind, doc.question, content,
                                    "user_edit", None, review)
 
 
@@ -148,24 +161,30 @@ def print_resume(document_id: Id, conn: Conn):
         return HTMLResponse(_text_page(doc.content, f"{_KIND_NAME.get(doc.kind, 'Document')} · {app.job_title} at "
                                                     f"{app.company}"))
     resume = tailoring.TailoredResume.model_validate_json(doc.content)
-    return resume_render.render(resume, app.job_title, app.company)
+    strict = repository.get_profile(conn).resume_settings.strict_layout
+    return resume_render.render(resume, app.job_title, app.company,
+                                download_url=f"/documents/{document_id}/pdf" if strict else None)
 
 
 def _pdf_bytes(html: str) -> bytes:
-    from app import browser as chromium
-
-    def make(b):
-        pg = chromium.print_page(b, html)
-        try:
-            pg.evaluate("() => window.smartJustify && window.smartJustify()")
-            return pg.pdf(format="Letter", prefer_css_page_size=True, print_background=True)
-        finally:
-            pg.close()
     try:
-        return chromium.run(make, timeout=60)
+        return layout.render_pdf(html)
     except Exception as exc:
         raise HTTPException(503, "Could not make the PDF here (no browser available). Use Print / Save as PDF "
                                  f"instead. ({type(exc).__name__})") from exc
+
+
+def _resume_pdf(resume, profile, job_title: str, company: str) -> bytes:
+    if not profile.resume_settings.strict_layout:
+        return _pdf_bytes(resume_render.render(resume, job_title, company))
+    if resume.print_layout is None:
+        resume = resume.model_copy(update={"print_layout": "standard"})
+    try:
+        return layout.strict_pdf(resume, profile, lambda r: resume_render.render(r, job_title, company))
+    except ConflictError:
+        raise
+    except Exception as exc:
+        raise HTTPException(503, "Could not verify the résumé PDF. Try again when Chromium is available.") from exc
 
 
 @router.get("/documents/{document_id}/pdf", responses={404: {"description": "Not found"},
@@ -176,9 +195,12 @@ def pdf(document_id: Id, conn: Conn, inline: bool = False):
     import re as _re
     doc = repository.get_document(conn, document_id)
     app = repository.get_application(conn, doc.application_id)
-    page = print_resume(document_id, conn)
-    html = page.body.decode() if hasattr(page, "body") else str(page)
-    data = _pdf_bytes(html)
+    if doc.kind == "resume":
+        resume = tailoring.TailoredResume.model_validate_json(doc.content)
+        data = _resume_pdf(resume, repository.get_profile(conn), app.job_title, app.company)
+    else:
+        page = print_resume(document_id, conn)
+        data = _pdf_bytes(page.body.decode())
     name = _re.sub(r"[^A-Za-z0-9]+", "-", f"{_KIND_NAME.get(doc.kind, 'document')}-{app.company}-v{doc.version}")
     how = "inline" if inline else "attachment"
     return Response(data, media_type="application/pdf",
@@ -196,7 +218,10 @@ def _resume_context(conn: sqlite3.Connection, document_id: int):
 
 @router.get("/documents/{document_id}/technical-coverage", response_model=resume_match.Coverage)
 def technical_coverage(document_id: Id, conn: Conn):
+    from app import gap_review
+
     _, resume, profile, job = _resume_context(conn, document_id)
+    gap_review.ensure(conn, job)
     return resume_match.analyze(resume, profile, job)
 
 
@@ -216,13 +241,17 @@ def verified_evidence(document_id: Id, body: EvidenceEdit, conn: Conn):
     ranks = {"bullet": 2, "skills": 1, "mention": 1}
     if any(ranks.get(old.placement, 0) > ranks.get(new.placement, 0) for old, new in zip(before.rows, after.rows)):
         raise ConflictError("This edit would remove existing technical evidence. Choose another bank record.")
+    strict = profile.resume_settings.strict_layout
+    page_fit = layout.fit_strict(resume, profile, lambda r: resume_render.render(r, job.title, job.company),
+                                 allow_trim=False) if strict else None
     content = resume.model_dump_json()
     approval = hashlib.sha256(json.dumps([doc.id, body.keyword, edit.record.id, content, before.model_dump(),
                                            after.model_dump()], sort_keys=True).encode()).hexdigest()
     if body.approval is not None and body.approval != approval:
         raise ConflictError("The résumé, posting, or bank evidence changed. Preview the edit again before saving.")
 
-    measured = layout.browser_measure(resume_render.render(resume, job.title, job.company))
+    measured = (0, page_fit["printed_pages"]) if page_fit else layout.browser_measure(
+        resume_render.render(resume, job.title, job.company))
     pages = measured[1] if measured else None
     warnings = []
     if pages is None:
@@ -231,14 +260,13 @@ def verified_evidence(document_id: Id, body: EvidenceEdit, conn: Conn):
         warnings.append(f"This version prints on {pages} pages. Check the page length before sending.")
     saved = None
     if body.approval is not None:
-        ignore = {s.lower() for s in job.required_skills + job.preferred_skills
-                  if preferences.check_title(job.title, [s])[0] == "strong"}
-        legacy = ats.analyze(tailoring.resume_text(resume), tailoring.profile_text(profile),
-                             job.required_skills, job.preferred_skills, ignore, profile)
+        legacy = resume_match.ats_report(after)
         review = {"method": "verified_evidence", "edited_from_version": doc.version, "warnings": warnings,
-                  "facts_used": [edit.record.id], "ats": {"score_before": doc.review.get("ats", {}).get("score", legacy.score),
+                  "facts_used": [edit.record.id], "ats": {"score_before": before.score or 0.0,
                                                          **legacy.model_dump()}}
-        if pages is not None:
+        if page_fit:
+            review["layout"] = page_fit
+        elif pages is not None:
             review["layout"] = {"measured": True, "printed_pages": pages, "estimated_pages": pages,
                                 "max_pages": layout.MAX_PAGES, "fits": pages <= layout.MAX_PAGES}
         saved = repository.add_document(conn, doc.application_id, "resume", doc.question, content,
@@ -252,7 +280,7 @@ def verified_evidence(document_id: Id, body: EvidenceEdit, conn: Conn):
 def check_pdf(document_id: Id, conn: Conn):
     _, resume, profile, job = _resume_context(conn, document_id)
     coverage = resume_match.analyze(resume, profile, job)
-    data = _pdf_bytes(resume_render.render(resume, job.title, job.company))
+    data = _resume_pdf(resume, profile, job.title, job.company)
     try:
         return resume_pdf_review.check(data, resume, coverage)
     except Exception as exc:
@@ -369,16 +397,14 @@ def edit_section(document_id: Id, body: SectionEdit, conn: Conn):
         review = {"method": "section_edit", "edited_from_version": doc.version, "warnings": warnings,
                   "facts_used": [r.id for r in evidence], "section": body.section}
         if doc.kind == "resume":
-            from app import ats, layout, preferences
             resume = tailoring.TailoredResume.model_validate_json(content)
             supported = resume.model_copy(deep=True)
             if body.section == "skills" and tailoring.drop_unsupported_skills(supported, profile):
                 raise ConflictError("Remove the unsupported skills listed in the edit check before saving.")
-            ignored = {s.lower() for s in job.required_skills + job.preferred_skills
-                       if preferences.check_title(job.title, [s])[0] == "strong"}
-            coverage = ats.analyze(tailoring.resume_text(resume), tailoring.profile_text(profile),
-                                   job.required_skills, job.preferred_skills, ignored, profile)
-            review["ats"] = {"score_before": doc.review.get("ats", {}).get("score", coverage.score),
+            coverage = resume_match.ats_report(resume_match.analyze(resume, profile, job))
+            previous_resume = tailoring.TailoredResume.model_validate_json(doc.content)
+            before = resume_match.analyze(previous_resume, profile, job)
+            review["ats"] = {"score_before": before.score or 0.0,
                              **coverage.model_dump()}
             page = layout.browser_measure(resume_render.render(resume, job.title, job.company))
             if page is not None:

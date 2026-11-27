@@ -144,6 +144,8 @@ def update_job(job_id: JobId, body: JobUpdate, request: Request, conn: Conn):
     repository.get_job(conn, job_id)
     fields = {"skills" if k.endswith("_skills") else k for k in changes}
     intake_worker(request).lock(conn, job_id, fields)     # before saving: a late answer can't slip in between
+    if "skills" in fields or "description" in fields:
+        changes["technical_skills_override"] = "skills" in fields
     if "description" in changes and "required_skills" not in changes:
         job = repository.get_job(conn, job_id)
         info = job_intake.intake(changes["description"], job.source_url and str(job.source_url),
@@ -176,7 +178,7 @@ def refresh_job(job_id: JobId, request: Request, conn: Conn):
                             "description and paste it instead.")
     info = job_intake.intake(description, url, account_llm(request), known_title=job.title)
     return repository.update_job(conn, job_id, {"description": description, "required_skills": info.required_skills,
-                                                "preferred_skills": info.preferred_skills})
+                                                "preferred_skills": info.preferred_skills, "technical_skills_override": False})
 
 
 @router.get("", response_model=list[JobOut])
@@ -244,28 +246,30 @@ def _same_description(conn, description: str):
 
 @router.get("/{job_id}/requirements", responses={404: {"description": "Job or profile not found"}})
 def requirements(job_id: JobId, conn: Conn):
-    """The posting's requirements and, for each, your evidence: the exact employer/project and experience
-    records behind a direct match, related experience, or a gap. The same analysis the resume uses; no AI."""
-    from app import selection
+    """The scored technical skills and supporting experience, with the posting line for each."""
+    from app import selection, technical_requirements, vocabulary
     from app.bank import verified
     profile = repository.get_profile(conn)
     job = repository.get_job(conn, job_id)
     plan = selection.plan(profile, job)
-    records = {r.id: r for r in profile.experience_bank}
-    label = {"direct": "direct evidence", "partial": "direct evidence (part of it)", "transferable": "related experience",
-             "skills only": "related experience (skills list)", "gap": "gap", "shown by example": "shown by example",
-             "not shown": "not shown"}
+    records = verified(profile)
     rows = []
-    for r in plan.rows:
+    for skill in technical_requirements.for_job(job):
+        hits = [r for r in records if technical_requirements.supports(r.text, skill.options)]
+        proof = technical_requirements.profile_evidence(profile, skill.options)
+        found = [vocabulary.canonical(term) for term in skill.options if
+                 any(technical_requirements.supports(r.text, (term,)) for r in hits)
+                 or proof and technical_requirements.supports(proof, (term,))]
+        related = [] if hits or proof else [r for r in records if technical_requirements.relates(r.text, skill.options)]
+        strength = "direct" if hits else "skills only" if proof else "transferable" if related else "gap"
         rows.append({
-            "requirement": r.requirement, "kind": r.kind, "category": r.category, "strength": r.strength,
-            "evidence": label.get(r.strength, r.strength), "found": r.found_parts, "missing": r.not_found_parts,
-            "found_elsewhere": r.found_elsewhere,
-            "records": [{"id": i, "owner": records[i].owner, "text": records[i].text} for i in r.selected_ids
-                        if i in records],
+            "requirement": skill.label, "kind": "required" if skill.required else "preferred",
+            "source": skill.source, "category": "technical", "strength": strength,
+            "evidence": {"direct": "verified evidence", "skills only": "listed in your profile",
+                         "transferable": "related experience", "gap": "gap"}[strength],
+            "found": found, "missing": [] if proof or hits else [vocabulary.canonical(term) for term in skill.options],
+            "found_elsewhere": {},
+            "records": [{"id": r.id, "owner": r.owner, "text": r.text} for r in (hits or related)[:4]],
         })
-    order = {"required": 0, "preferred": 1, "responsibility": 2}
-    cat = {"technical": 0, "education": 1, "soft skill": 2}
-    rows.sort(key=lambda x: (cat.get(x["category"], 3), order.get(x["kind"], 3)))
-    return {"job_id": job.id, "role_types": plan.role_types, "has_bank": bool(verified(profile)),
+    return {"job_id": job.id, "role_types": plan.role_types, "has_bank": bool(records),
             "eligibility": plan.eligibility, "rows": rows}

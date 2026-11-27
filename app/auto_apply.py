@@ -6,17 +6,19 @@ import hashlib
 import json
 import os
 import queue
+import re
 import sqlite3
 import threading
 import uuid
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
-from app import career_browser, database, repository, resume_render, submission, tailoring
-from app.errors import ConflictError
+from app import career_browser, database, importers, repository, resume_render, submission, tailoring
+from app.errors import ConflictError, NotFoundError
 from app.schemas import ApplicationStatus, ApplicationUpdate, DocumentOut, ProfileOut
 
 ACTIVE = {"queued", "filling", "submitting"}
@@ -29,6 +31,7 @@ class Approval(BaseModel):
     resume_id: int = Field(gt=0)
     cover_letter_id: int | None = Field(None, gt=0)
     answers: dict[str, str] = Field(default_factory=dict, max_length=35)
+    screening_answers: dict[str, str] | None = Field(None, max_length=60)
     reviewed_in_browser: bool = False
 
 
@@ -39,6 +42,7 @@ class Run(BaseModel):
     resume_id: int | None = None
     cover_letter_id: int | None = None
     evidence: str | None = None
+    uploaded: list[str] = []
 
 
 class ApprovedPlan(BaseModel):
@@ -60,18 +64,36 @@ def _digest(values) -> str:
     return hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _contact(profile: ProfileOut) -> dict[str, str]:
+def _contact(profile: ProfileOut, resume: tailoring.TailoredResume | None = None) -> dict[str, str]:
     c = profile.contact
-    first, last = submission._split_name(profile.full_name)
-    links = list(map(str, c.links))
-    linkedin = next((u for u in links if "linkedin.com/" in u.lower()), "")
-    github = next((u for u in links if "github.com/" in u.lower()), "")
+    contact = resume.contact if resume else {}
+    name = (resume.name.strip() if resume else "") or profile.full_name
+    first, last = submission._split_name(name)
+    resume_links = contact.get("links")
+    urls = dict.fromkeys(map(str, [*(resume_links if isinstance(resume_links, list) else []), *c.links]))
+    links = {}
+    for url in urls:
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme in {"https", "http"} and parsed.hostname and parsed.username is None:
+                links[url] = parsed.hostname
+        except ValueError:
+            continue
+
+    def domain_link(domain):
+        return next((u for u, host in links.items() if host == domain or host.endswith("." + domain)), "")
+
+    linkedin, github = domain_link("linkedin.com"), domain_link("github.com")
     website = next((u for u in links if u not in (linkedin, github)), "")
-    locality = (c.location or "").rsplit(",", 1)[-1].strip()
+    location = contact.get("location") or c.location or ""
+    locality = location.rsplit(",", 1)[-1].strip()
     country = next((name for name in ("Canada", "United States", "United Kingdom", "Australia", "India")
                     if name.casefold() == locality.casefold()), "")
-    return {key: value for key, value in {"first_name": first, "last_name": last, "full_name": profile.full_name,
-            "email": c.email, "phone": c.phone, "location": c.location, "country": country, "linkedin": linkedin,
+    employers = {role.company for role in profile.experience if role.end_date is None}
+    current_company = next(iter(employers)) if len(employers) == 1 else ""
+    return {key: value for key, value in {"first_name": first, "last_name": last, "full_name": name,
+            "email": contact.get("email") or c.email, "phone": contact.get("phone") or c.phone,
+            "location": location, "country": country, "current_company": current_company, "linkedin": linkedin,
             "github": github, "website": website}.items() if value}
 
 
@@ -158,12 +180,19 @@ def clear_unreceived(conn, application_id: int) -> Run:
         return _status(_read(conn, application_id))
 
 
-def _context(conn, application_id: int):
-    app = repository.get_application(conn, application_id)
+def _portal_url(conn, application_id: int, source_url: str | None) -> str:
     link = conn.execute("SELECT url FROM application_portal_links WHERE application_id=?", (application_id,)).fetchone()
-    target = career_browser.target_for(link["url"] if link else app.source_url or "")
+    return link["url"] if link else source_url or ""
+
+
+def _context(conn, application_id: int, resume_id: int | None = None):
+    app = repository.get_application(conn, application_id)
+    target = career_browser.target_for(_portal_url(conn, application_id, app.source_url))
     profile = repository.get_profile(conn)
-    contact = _contact(profile)
+    doc = _doc(conn, application_id, resume_id, "resume") if resume_id else next(
+        (d for d in repository.list_documents(conn, application_id) if d.kind == "resume"), None)
+    resume = tailoring.TailoredResume.model_validate_json(doc.content) if doc else None
+    contact = _contact(profile, resume)
     answers = []
     if target.provider == "greenhouse":
         latest = conn.execute("""SELECT content FROM documents WHERE application_id=? AND kind='application_plan'
@@ -173,18 +202,20 @@ def _context(conn, application_id: int):
             if prior.approved and career_browser.target_for(prior.apply_url).key == target.key:
                 answers = [{"name": f.name, "label": f.label, "value": f.answer} for f in prior.fields
                            if f.answer and not f.sensitive and f.type not in {"file", "hidden"}
-                           and f.name not in {"first_name", "last_name", "email", "phone", "country", "location"}]
+                           and not career_browser.contact_key(f.label)]
     base = _digest([app.id, app.job_title, app.company, target.model_dump(), contact, profile.updated_at, answers])
     return app, target, contact, answers, base
 
 
-def setup(conn, application_id: int) -> dict:
+def setup(conn, application_id: int, resume_id: int | None = None) -> dict:
     app = repository.get_application(conn, application_id)
     run = status(conn, application_id)
     try:
-        _, target, contact, answers, preview = _context(conn, application_id)
+        _, target, contact, answers, preview = _context(conn, application_id, resume_id or run.resume_id)
     except ConflictError as exc:
-        return {"supported": False, "reason": str(exc), "run": run,
+        manual_url = career_browser.manual_portal_for(_portal_url(conn, application_id, app.source_url))
+        return {"supported": False, "reason": "Complete this application on its posting page." if manual_url else str(exc),
+                "manual_url": manual_url, "run": run,
                 "can_set_portal": app.status.value not in BLOCKED_APP_STATUS and run.state in {"idle", "cancelled"}}
     docs = repository.list_documents(conn, application_id)
     materials = [{"id": d.id, "version": d.version, "kind": d.kind} for d in docs if d.kind in {"resume", "cover_letter"}]
@@ -195,17 +226,138 @@ def setup(conn, application_id: int) -> dict:
 
 
 def save_portal(conn, application_id: int, url: str) -> dict:
-    target = career_browser.target_for(url)
+    manual_url = career_browser.manual_portal_for(url)
+    target = None if manual_url else career_browser.target_for(url)
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         app = repository.get_application(conn, application_id)
         row = _read(conn, application_id)
         if app.status.value in BLOCKED_APP_STATUS or (row and row["state"] != "cancelled"):
             raise ConflictError("Choose the employer portal before starting an auto-apply run.")
-        _duplicate(conn, application_id, target)
+        if target:
+            _duplicate(conn, application_id, target)
         conn.execute("""INSERT INTO application_portal_links (application_id, url) VALUES (?, ?)
-                     ON CONFLICT(application_id) DO UPDATE SET url=excluded.url""", (application_id, target.url))
+                     ON CONFLICT(application_id) DO UPDATE SET url=excluded.url""",
+                     (application_id, target.url if target else manual_url))
     return setup(conn, application_id)
+
+
+_CANADA_STATUS = re.compile(r"(?:canadian (?:permanent resident|citizen)|(?:permanent resident|citizen) of canada|"
+                            r"(?:permanent resident|citizen) \(canada\))", re.I)
+_CANADA_REGIONS = {"ab", "bc", "mb", "nb", "nl", "ns", "nt", "nu", "on", "pe", "qc", "sk", "yt",
+                   "alberta", "british columbia", "manitoba", "new brunswick", "newfoundland and labrador",
+                   "nova scotia", "northwest territories", "nunavut", "ontario", "prince edward island",
+                   "quebec", "saskatchewan", "yukon"}
+_CANADA_AUTHORIZATION = re.compile(r"are you (?:currently )?(?:legally )?authori[sz]ed to work in canada")
+_CANADA_SPONSORSHIP = re.compile(r"(?:will you|do you) (?:now or in the future )?require sponsorship to "
+                                 r"(?:legally )?work in canada")
+
+
+def _canada_only(location: str) -> bool:
+    if any(separator in location for separator in (";", "/", "|", "\n")):
+        return False
+    parts = [career_browser.label_key(part) for part in location.split(",")]
+    if len(parts) == 1:
+        return parts[0] in {"canada", "canada remote", "remote canada"}
+    if parts.count("canada") != 1 or len(parts) not in {2, 3} or not all(parts):
+        return False
+    if len(parts) == 2:
+        return any(part in _CANADA_REGIONS for part in parts)
+    return (parts[-1] == "canada" and parts[1] in _CANADA_REGIONS
+            or parts[0] == "canada" and parts[-1] in _CANADA_REGIONS)
+
+
+def screening_fields(conn, application_id: int, fetch, resume_id: int | None = None) -> dict:
+    """Read public Greenhouse question definitions without opening or sending data to the form."""
+    _, target, contact, plan, _ = _context(conn, application_id, resume_id)
+    if target.provider != "greenhouse":
+        return {"questions": [], "cover_letter": None}
+    _, board, _, posting = target.path.split("/")
+    host = "boards-api.eu.greenhouse.io" if ".eu." in target.host else "boards-api.greenhouse.io"
+    try:
+        data = fetch(f"https://{host}/v1/boards/{board}/jobs/{posting}?questions=true")
+    except (importers.ImportError_, NotFoundError, OSError, ValueError):
+        return {"questions": [], "cover_letter": None, "warning": "The employer’s questions could not be loaded in advance."}
+    if not isinstance(data, dict) or not isinstance(data.get("questions"), list):
+        return {"questions": [], "cover_letter": None, "warning": "The employer’s questions could not be loaded in advance."}
+
+    profile = repository.get_profile(conn)
+    saved = {career_browser.saved_answer_key(a["name"], a["label"]): a["value"] for a in plan}
+    drafts = {}
+    for doc in repository.list_documents(conn, application_id):
+        if doc.kind == "screening_answer" and not doc.review.get("warnings"):
+            drafts.setdefault(career_browser.label_key(doc.question), doc.content)
+    prior = _read(conn, application_id)
+    prior_data = json.loads(prior["data"]) if prior else {}
+    previous = prior_data.get("plan", {})
+    browser_draft = prior_data.get("screening_draft", {}) if prior and prior["target_key"] == target.key else {}
+    if previous.get("target", {}).get("key") == target.key:
+        saved.update(previous.get("answers", {}))
+    settled_in_canada = bool(_CANADA_STATUS.fullmatch((profile.preferences.work_authorization or "").strip()))
+    verified_canada = _canada_only(str((data.get("location") or {}).get("name") or ""))
+    fields = []
+    cover_letter = False
+    seen = set()
+    for question in data["questions"]:
+        if not isinstance(question, dict):
+            continue
+        label = str(question.get("label") or "").strip()[:500]
+        if not label:
+            continue
+        label_id = career_browser.label_key(label)
+        required = bool(question.get("required"))
+        for field in question.get("fields") or []:
+            name, kind = field.get("name", ""), field.get("type", "")
+            if name == "cover_letter" and kind == "input_file":
+                cover_letter = True
+            if not name.startswith("question_") or kind not in submission._TYPE or kind in {"input_hidden", "input_file"}:
+                continue
+            key = career_browser.saved_answer_key(name, label)
+            if key in seen:
+                continue
+            seen.add(key)
+            options = [str(v["label"]) for v in field.get("values", []) if v.get("label")]
+            manual = career_browser.requires_browser_review(label)
+            draftable = not manual and career_browser.can_draft_screening(label, "textarea" if kind == "textarea" else "text") and not options
+            suggestion = "" if manual else saved.get(key, "")
+            source = "Previously reviewed" if suggestion else ""
+            if not manual and not suggestion and key in browser_draft:
+                suggestion, source = browser_draft[key], "Saved from the paused employer form"
+            if not manual and not suggestion:
+                contact_key = career_browser.contact_key(label)
+                if contact_key:
+                    suggestion, source = contact.get(contact_key, ""), "Selected résumé and profile"
+                elif settled_in_canada and verified_canada and options:
+                    work_question = re.sub(r"\s*\(e\.g\., work permit, LMIA-based sponsorship, etc\.\)\??\s*$", "", label, flags=re.I)
+                    work_question = career_browser.label_key(work_question)
+                    wanted = "No" if _CANADA_SPONSORSHIP.fullmatch(work_question) else "Yes" if _CANADA_AUTHORIZATION.fullmatch(work_question) else ""
+                    if wanted in options:
+                        suggestion, source = wanted, "Saved Canadian work authorization"
+                if not suggestion and draftable and label_id in drafts:
+                    suggestion, source = drafts[label_id], "Saved screening draft"
+            if options and any(part.strip() not in options for part in suggestion.split(";") if part.strip()):
+                suggestion = ""
+            fields.append(career_browser.Question(key=key, label=label, options=options, manual=manual,
+                                                  required=required, draftable=draftable, suggested=suggestion,
+                                                  source=source if suggestion else "",
+                                                  multiple=kind == "multi_value_multi_select"))
+    return {"questions": fields, "cover_letter": cover_letter}
+
+
+def review_screening(plan: dict, supplied: dict[str, str]) -> dict[str, str]:
+    allowed = {q.key: q for q in plan["questions"] if not q.manual}
+    if any(key not in allowed for key in supplied):
+        raise ConflictError("The employer’s screening questions changed. Reload them and review your answers.")
+    approved = {}
+    for key, value in supplied.items():
+        question, value = allowed[key], value.strip()
+        chosen = [v.strip() for v in value.split(";") if v.strip()] if question.multiple else [value]
+        if len(value) > 4000 or (question.options and value and any(v not in question.options for v in chosen)):
+            raise ConflictError("Choose one of the employer’s options for: " + question.label)
+        if question.multiple and "security clearance" in career_browser.label_key(question.label) and len(chosen) > 1:
+            raise ConflictError("Choose your current security clearance status from the employer’s options.")
+        approved[key] = "; ".join(chosen) if question.multiple else value
+    return approved
 
 
 def _doc(conn, application_id: int, doc_id: int, kind: str) -> DocumentOut:
@@ -232,11 +384,11 @@ def _duplicate(conn, application_id: int, target: career_browser.Target):
             raise ConflictError("This employer posting already has a submitted or attempted application.")
 
 
-def enqueue(conn, application_id: int, approval: Approval) -> tuple[Run, str | None]:
+def enqueue(conn, application_id: int, approval: Approval, approved_screening: dict | None = None) -> tuple[Run, str | None]:
     status(conn, application_id)  # recover any expired worker before claiming
     with conn:
         conn.execute("BEGIN IMMEDIATE")
-        app, target, contact, saved_answers, version = _context(conn, application_id)
+        app, target, contact, saved_answers, version = _context(conn, application_id, approval.resume_id)
         row = _read(conn, application_id)
         prior = _status(row)
         if prior.state in ACTIVE:
@@ -245,7 +397,6 @@ def enqueue(conn, application_id: int, approval: Approval) -> tuple[Run, str | N
             raise ConflictError("A submission has already been attempted for this job. Check the employer portal before proceeding.")
         if approval.preview != version:
             raise ConflictError("The posting or your profile changed. Reload the application and review the details again.")
-        _doc(conn, application_id, approval.resume_id, "resume")
         if approval.cover_letter_id is not None:
             _doc(conn, application_id, approval.cover_letter_id, "cover_letter")
         if approval.reviewed_in_browser and prior.state != "needs_you":
@@ -258,8 +409,12 @@ def enqueue(conn, application_id: int, approval: Approval) -> tuple[Run, str | N
         previous_plan = json.loads(row["data"]).get("plan", {}) if row else {}
         answers = {career_browser.saved_answer_key(a["name"], a["label"]): a["value"] for a in saved_answers}
         if previous_plan.get("session_key") == session:
-            answers.update(previous_plan.get("answers", {}))
+            for key, value in previous_plan.get("answers", {}).items():
+                if approved_screening is None or not key.startswith("approved:question_"):
+                    answers[key] = value
         answers.update({k: v.strip() for k, v in approval.answers.items() if v.strip()})
+        if approved_screening is not None:
+            answers.update(approved_screening)
         plan = ApprovedPlan(target=target, contact=contact, preview=version,
                             resume_id=approval.resume_id, cover_letter_id=approval.cover_letter_id,
                             answers=answers, reviewed_in_browser=approval.reviewed_in_browser, session_key=session)
@@ -274,20 +429,24 @@ def enqueue(conn, application_id: int, approval: Approval) -> tuple[Run, str | N
 
 
 def _attachments(conn, application_id: int, plan: ApprovedPlan) -> dict[str, dict]:
-    from app.routers.documents import _pdf_bytes
+    from app.routers.documents import _pdf_bytes, _resume_pdf
 
     app = repository.get_application(conn, application_id)
     profile = repository.get_profile(conn)
     doc = _doc(conn, application_id, plan.resume_id, "resume")
     resume = tailoring.TailoredResume.model_validate_json(doc.content)
-    pdfs = {"resume": (f"Resume-v{doc.version}-{doc.id}.pdf", resume_render.render(resume, app.job_title, app.company))}
+    pdfs = {"resume": (f"Resume-v{doc.version}-{doc.id}.pdf", _resume_pdf(resume, profile, app.job_title, app.company))}
     if plan.cover_letter_id is not None:
         letter = _doc(conn, application_id, plan.cover_letter_id, "cover_letter")
-        html = resume_render.render_letter(letter.content, profile.full_name, profile.contact.model_dump(mode="json"),
+        contact = profile.contact.model_dump(mode="json")
+        for key in ("email", "phone", "location"):
+            if plan.contact.get(key):
+                contact[key] = plan.contact[key]
+        html = resume_render.render_letter(letter.content, plan.contact.get("full_name", profile.full_name), contact,
                                            app.job_title, app.company)
-        pdfs["cover_letter"] = f"Cover-Letter-v{letter.version}-{letter.id}.pdf", html
-    return {kind: {"name": name, "mimeType": "application/pdf", "buffer": _pdf_bytes(html)}
-            for kind, (name, html) in pdfs.items()}
+        pdfs["cover_letter"] = f"Cover-Letter-v{letter.version}-{letter.id}.pdf", _pdf_bytes(html)
+    return {kind: {"name": name, "mimeType": "application/pdf", "buffer": data}
+            for kind, (name, data) in pdfs.items()}
 
 
 def _mark_attempt(path: Path, application_id: int, token: str, plan: ApprovedPlan):
@@ -296,7 +455,7 @@ def _mark_attempt(path: Path, application_id: int, token: str, plan: ApprovedPla
         row = _read(conn, application_id)
         if not row or row["run_token"] != token or row["state"] != "filling":
             raise ConflictError("This browser run is no longer active.")
-        app, target, _, _, current = _context(conn, application_id)
+        app, target, _, _, current = _context(conn, application_id, plan.resume_id)
         if app.status.value in BLOCKED_APP_STATUS or target != plan.target or current != plan.preview:
             raise ConflictError("The job, application status or profile changed before submission.")
         _duplicate(conn, application_id, target)
@@ -318,7 +477,7 @@ def _finish(conn, application_id: int, token: str, result: career_browser.Browse
         if old != "submitting" and state in {"confirmed", "uncertain"}:
             state, message = "failed", "The submit attempt could not be verified. Check the employer portal."
         _write(conn, row, state, message=message, evidence=result.evidence if state == "confirmed" else None,
-               questions=[q.model_dump() for q in result.questions])
+               questions=[q.model_dump() for q in result.questions], uploaded=sorted(result.uploaded))
         if state in {"confirmed", "uncertain"}:
             app = repository.get_application(conn, application_id)
             if app.status is ApplicationStatus.submission_attempted:
@@ -368,7 +527,7 @@ class Worker:
                         return
                     _write(conn, row, "filling", message="Opening the employer form and attaching the approved documents.")
                     plan = ApprovedPlan.model_validate(json.loads(row["data"])["plan"])
-                    app, target, _, _, current = _context(conn, application_id)
+                    app, target, _, _, current = _context(conn, application_id, plan.resume_id)
                     if app.status.value in BLOCKED_APP_STATUS or target != plan.target or current != plan.preview:
                         raise ConflictError("The job, application status or profile changed. Review the plan again.")
                 files = _attachments(conn, application_id, plan)

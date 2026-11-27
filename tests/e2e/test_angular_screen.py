@@ -121,7 +121,7 @@ def test_profile_job_match_and_tracking(ui: Page):
     import_job(ui)
     open_workspace(ui)
     ui.get_by_role("tab", name="Job & skill match").click()
-    expect(ui.get_by_test_id("match")).to_contain_text("What this job asks for")
+    expect(ui.get_by_test_id("match")).to_contain_text("Technical skills and your evidence")
     ui.get_by_role("tab", name="Documents").click()
 
     status = ui.get_by_label("Application status")
@@ -133,9 +133,14 @@ def test_profile_job_match_and_tracking(ui: Page):
     ui.get_by_role("button", name="Cancel").click()
     expect(status).to_have_value("preparing")
 
+    ui.get_by_role("button", name="Edit job title").click()
+    ui.get_by_label("Job title", exact=True).fill("Senior Test Automation Engineer")
+    ui.get_by_role("button", name="Save job title").click()
+    expect(ui.get_by_test_id("workspace-title")).to_have_text("Senior Test Automation Engineer")
+
     ui.get_by_role("link", name="← Back to applications").click()
     ui.get_by_label("Search by job title or company").fill("example corp")
-    expect(ui.get_by_test_id("applications-table")).to_contain_text("Senior QA Engineer")
+    expect(ui.get_by_test_id("applications-table")).to_contain_text("Senior Test Automation Engineer")
 
 
 def test_cover_letter_draft_and_edit(ui: Page):
@@ -279,6 +284,16 @@ def test_find_jobs_then_apply_prepares_everything(ui: Page):
         expect(saved.get_by_role("link", name="Open application")).to_be_visible()
     finally:
         new_tab.close()
+    ui.get_by_text("Saved searches", exact=True).click()
+    ui.get_by_label("Save these filters as").fill("QA in Canada")
+    ui.get_by_role("button", name="Save search").click()
+    expect(ui.get_by_text("QA in Canada", exact=True)).to_be_visible()
+    with ui.expect_response(re.compile(r"/search/saved/\d+/run$")):
+        ui.get_by_role("button", name="Run", exact=True).click()
+    expect(ui.get_by_test_id("found-jobs")).to_contain_text("Senior QA Engineer")
+    ui.get_by_role("button", name="Remove", exact=True).click()
+    expect(ui.get_by_text("Saved search removed.")).to_be_visible()
+    expect(ui.get_by_text("QA in Canada", exact=True)).to_have_count(0)
 
 
 def test_a_gap_you_really_have_can_be_added_and_used(ui: Page):
@@ -288,7 +303,7 @@ def test_a_gap_you_really_have_can_be_added_and_used(ui: Page):
     job = ui.request.get("/jobs").json()[0]          # the job also asks for a tool the profile doesn't name
     ui.request.patch(f"/jobs/{job['id']}", data={"required_skills": job["required_skills"] + ["TestRail"]})
     generate(ui, "Resume only")
-    expect(ui.get_by_test_id("attention")).to_contain_text("TestRail")
+    expect(ui.get_by_test_id("missing-technical-skills")).to_contain_text("TestRail")
     ui.get_by_test_id("resume-details").locator("summary").first.click()
     gaps = ui.get_by_test_id("gaps")
     gaps.get_by_role("button", name="I have this").last.click()                 # the one next to TestRail
@@ -302,7 +317,7 @@ def test_a_gap_you_really_have_can_be_added_and_used(ui: Page):
     expect(ui.get_by_test_id("profile-changed")).to_contain_text("Profile updated since this draft")
     ui.get_by_test_id("profile-changed").get_by_role("button", name="Generate a new version").click()
     expect(ui.get_by_test_id("version")).to_contain_text("v2", timeout=30_000)
-    expect(ui.get_by_test_id("attention")).not_to_contain_text("TestRail")
+    expect(ui.get_by_test_id("missing-technical-skills").filter(has_text="TestRail")).to_have_count(0)
 
 
 def test_auto_apply_panel_submits_the_selected_version_and_refreshes_tracking(ui: Page):
@@ -313,6 +328,12 @@ def test_auto_apply_panel_submits_the_selected_version_and_refreshes_tracking(ui
     panel = ui.get_by_test_id("auto-apply")
     panel.locator("summary").first.click()
     expect(panel.get_by_label("Résumé to submit")).to_be_visible()
+    screening = panel.get_by_test_id("auto-apply-screening")
+    expect(screening).to_be_visible()
+    screening.get_by_label(re.compile("How did you hear")).fill("Fictional employer’s website")
+    screening.get_by_label(re.compile("require immigration sponsorship")).select_option("No")
+    panel.get_by_role("button", name="Draft screening answers for review").click()
+    expect(screening.get_by_label(re.compile("Why do you want to work here"))).not_to_have_value("", timeout=15_000)
     expect(panel.get_by_role("button", name="Approve and submit")).to_be_enabled()
     panel.get_by_role("button", name="Approve and submit").click()
     expect(panel.get_by_test_id("auto-apply-status")).to_contain_text("Submitted and confirmed", timeout=20_000)
@@ -338,6 +359,10 @@ def test_verified_evidence_improves_a_version_and_survives_pdf_export(ui: Page):
 
     coverage = ui.get_by_test_id("resume-coverage")
     expect(coverage.get_by_test_id("keyword-coverage")).to_have_text("0%")
+    missing = coverage.get_by_test_id("missing-technical-skills")
+    expect(missing).to_contain_text("100% of the weighted score")
+    expect(missing).to_contain_text("Evidence already in your profile")
+    expect(missing).to_contain_text("Cypress")
     coverage.get_by_text("Review technical requirements").click()
     coverage.get_by_role("button", name="Use verified evidence").click()
     preview = coverage.get_by_test_id("verified-evidence-preview")
@@ -347,6 +372,7 @@ def test_verified_evidence_improves_a_version_and_survives_pdf_export(ui: Page):
     preview.get_by_role("button", name="Save as new version").click()
     expect(ui.get_by_test_id("version")).to_contain_text("v2")
     expect(coverage.get_by_test_id("keyword-coverage")).to_have_text("100%")
+    expect(missing).to_have_count(0)
     coverage.get_by_role("button", name="Check exported PDF").click()
     result = coverage.get_by_test_id("pdf-check-result")
     expect(result).to_contain_text("1 of 1 required terms")
@@ -387,9 +413,23 @@ def test_technical_gap_review_generates_a_new_resume(ui: Page):
     aid = made.json()["id"]
     initial = ui.request.post(f"/applications/{aid}/drafts", data={"kind": "resume"})
     assert initial.ok
-    ui.goto(f"/ui/#/applications/{aid}?tab=match")
+
+    def stale_job(route):
+        response = route.fetch()
+        data = response.json()
+        data.pop("pending_technical_gaps", None)
+        route.fulfill(response=response, json=data)
+
+    drafts = []
+    ui.route(f"**/jobs/{snapshot['id']}", stale_job)
+    ui.route("**/experience-gaps/*/draft", lambda route: drafts.append(route))
+    with ui.expect_request("**/experience-gaps/*/draft"):
+        ui.goto(f"/ui/#/applications/{aid}?tab=match")
     panel = ui.get_by_test_id("gap-review")
-    expect(panel).to_contain_text("Cypress")
+    expect(panel.get_by_test_id("gap-example")).to_contain_text("Cypress")
+    expect(panel.get_by_role("textbox")).to_be_visible()
+    expect(panel.get_by_test_id("gap-drafting")).to_be_visible()
+    drafts.pop().continue_()
     # the AI writes the line at the best-fitting employer; nothing to type
     expect(panel.get_by_role("textbox")).to_have_value(re.compile(r"^Built Cypress tests for the checkout flow"))
     expect(panel.get_by_label("Employer or project")).to_have_value("Example Corp (fictional)")
@@ -399,5 +439,100 @@ def test_technical_gap_review_generates_a_new_resume(ui: Page):
     panel.get_by_role("checkbox").check()
     enable.click()
     expect(panel.get_by_role("status")).to_contain_text("verified")
+    bank = ui.request.get("/profile").json()["experience_bank"]
+    assert any(r["status"] == "verified" and r["text"].startswith("Built Cypress tests") for r in bank)
     panel.get_by_role("link", name="Open application and check resume progress").click()
     expect(ui.get_by_test_id("status-resume")).to_contain_text("v2", timeout=30_000)
+    latest = next(d for d in ui.request.get(f"/applications/{aid}/documents").json() if d["kind"] == "resume")
+    coverage = ui.request.get(f"/documents/{latest['id']}/technical-coverage").json()
+    assert next(r for r in coverage["rows"] if r["keyword"].lower() == "cypress")["placement"] == "bullet"
+
+
+def test_gap_review_validates_the_whole_batch_and_generates_only_once(ui: Page):
+    save_profile(ui)
+    skills = ["Cypress", "Gatling", "Datadog", "Prometheus", "Grafana", "Alerting", "Redis"]
+    job = ui.request.post("/jobs", data={"title": "SDET", "company": "Example Shop (fictional)",
+        "description": "Required qualifications:\n- " + "\n- ".join(skills), "required_skills": skills}).json()
+    aid = ui.request.post("/applications", data={"job_id": job["id"]}).json()["id"]
+    assert ui.request.post(f"/applications/{aid}/drafts", data={"kind": "resume"}).ok
+    gaps = {r["skill"].casefold(): r["id"] for r in ui.request.get(f"/experience-gaps?job_id={job['id']}").json()}
+    ui.route("**/experience-gaps/*/draft", lambda route: route.fulfill(status=502, json={"detail": "No draft available."}))
+    path = f"/ui/#/applications/{aid}?tab=match"
+    ui.goto(path)
+    editors = {s: ui.get_by_test_id(f"gap-row-{gaps[s.casefold()]}") for s in skills}
+    cypress, gatling = editors["Cypress"], editors["Gatling"]
+    line = "Ran load tests for the checkout API to compare release performance."
+    invalid = {"Cypress", "Gatling"}
+    for skill, row in editors.items():
+        bullet = line if skill in invalid else f"Used {skill} to validate checkout reliability before each release."
+        row.get_by_label("Employer or project").select_option("Example Corp (fictional)")
+        row.get_by_role("textbox").fill(bullet)
+        row.get_by_role("checkbox").check()
+    ui.get_by_role("button", name="Add 7 lines and update resume once").click()
+    expect(ui.get_by_test_id("gap-result")).to_contain_text("save your selected bullets together")
+    expect(cypress.get_by_role("alert")).to_contain_text("Mention Cypress")
+    expect(gatling.get_by_role("alert")).to_contain_text("Mention Gatling")
+    assert all(not r["id"].startswith("GAP") for r in ui.request.get("/profile").json()["experience_bank"])
+    ui.get_by_role("tab", name="Documents").click()
+    expect(ui.get_by_test_id("status-resume")).to_contain_text("v1")
+    ui.get_by_role("tab", name="Job & skill match").click()
+    expect(gatling.get_by_role("textbox")).to_have_value(line)
+    for row in editors.values():
+        expect(row.get_by_role("checkbox")).to_be_checked()
+    for skill in invalid:
+        editors[skill].get_by_role("textbox").fill(f"Used {skill} to validate checkout reliability before each release.")
+        expect(editors[skill].get_by_role("checkbox")).not_to_be_checked()
+        editors[skill].get_by_role("checkbox").check()
+    ui.get_by_role("button", name="Add 7 lines and update resume once").click()
+    expect(ui.get_by_test_id("gap-result")).to_contain_text("7 lines verified")
+    ui.get_by_role("link", name="Open application and check resume progress").click()
+    expect(ui.get_by_test_id("status-resume")).to_contain_text("v2", timeout=30_000)
+    versions = [d for d in ui.request.get(f"/applications/{aid}/documents").json() if d["kind"] == "resume"]
+    assert [d["version"] for d in versions] == [2, 1]
+    assert sum(r["id"].startswith("GAP") for r in ui.request.get("/profile").json()["experience_bank"]) == 7
+
+
+def test_suggest_a_bullet_uses_the_selected_employer_with_empty_text(ui: Page):
+    save_profile(ui)
+    job = ui.request.post("/jobs", data={"title": "SDET", "company": "Example Shop (fictional)",
+        "description": "Required qualifications:\n- Datadog", "required_skills": ["Datadog"]}).json()
+    aid = ui.request.post("/applications", data={"job_id": job["id"]}).json()["id"]
+    ui.route(re.compile(r"/experience-gaps/\d+/draft$"), lambda r: r.fulfill(status=502, json={"detail": "No draft available."}))
+    ui.goto(f"/ui/#/applications/{aid}?tab=match")
+    panel = ui.get_by_test_id("gap-review")
+    panel.get_by_label("Employer or project").select_option("Example Corp (fictional)")
+    expect(panel.get_by_role("textbox")).to_have_value("")
+    with ui.expect_request(re.compile(r"/experience-gaps/\d+/draft\?.*owner=")):
+        panel.get_by_role("button", name="Suggest a bullet").click()
+    expect(panel.get_by_role("textbox")).to_have_value(re.compile(r"^Used Datadog to \["))
+    expect(panel.get_by_label("Employer or project")).to_have_value("Example Corp (fictional)")
+    expect(panel.get_by_role("checkbox")).to_be_disabled()
+
+
+def test_tracking_activity_retries_and_opens_its_document_version(ui: Page):
+    save_profile(ui)
+    import_job(ui)
+    open_workspace(ui)
+    aid = int(ui.url.split("/applications/")[-1].split("?")[0])
+    doc = ui.request.post(f"/applications/{aid}/drafts", data={"kind": "resume"}).json()
+    ui.get_by_text("Next action and interview", exact=True).click()
+    ui.get_by_label("Next action").fill("Prepare technical examples")
+    ui.get_by_role("button", name="Save next action").click()
+    expect(ui.get_by_text("Prepare technical examples", exact=False).first).to_be_visible()
+    ui.get_by_role("tab", name="Interview prep").click()
+    version = ui.get_by_role("link", name=re.compile(r"Resume v1.*latest draft"))
+    expect(version).to_have_attribute("href", f"/documents/{doc['id']}/print")
+
+    ui.route(f"**/applications/{aid}/activity",
+             lambda r: r.fulfill(status=503, json={"detail": "Activity is temporarily unavailable."}), times=1)
+    ui.get_by_role("tab", name="Activity & notes").click()
+    expect(ui.get_by_role("alert")).to_have_text("Activity is temporarily unavailable.")
+    expect(ui.get_by_role("textbox", name="Notes")).to_be_disabled()
+    ui.get_by_role("button", name="Retry loading activity").click()
+    ui.get_by_role("textbox", name="Notes").fill("Fictional recruiter follow-up.")
+    ui.get_by_role("button", name="Save notes").click()
+    expect(ui.get_by_test_id("notes-state")).to_contain_text("Saved")
+    ui.get_by_test_id("timeline").get_by_role("button", name="Open this version").first.click()
+    expect(ui).to_have_url(re.compile(rf"[?&]doc={doc['id']}$"))
+    ui.get_by_role("tab", name="Activity & notes").click()
+    expect(ui.get_by_role("textbox", name="Notes")).to_have_value("Fictional recruiter follow-up.")

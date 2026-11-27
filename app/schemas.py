@@ -155,6 +155,8 @@ class ResumeSettings(StrictModel):
     max_bullets: list[Annotated[int, Field(ge=1, le=25)]] = Field(
         default_factory=lambda: [10, 7, 6, 5, 4], max_length=10,
         description="Most bullets per role, most recent role first.")
+    strict_layout: bool = Field(default=False, description="Require the configured role minimums, five summary lines, "
+                                "eight skill headings, at most five project points, and exactly two PDF pages.")
     current_role_focus: list[FocusTheme] = Field(
         default_factory=list, max_length=8,
         description="Themes your most recent role should lean towards, weighted by how much the job stresses them.")
@@ -238,6 +240,7 @@ class JobOut(JobCreate):
     id: int
     created_at: datetime
     skills_source: Literal["manual"] = "manual"
+    technical_skills_override: bool = Field(default=False, exclude=True)
     pending_technical_gaps: int = Field(default=0, exclude_if=lambda count: count == 0)
 
 

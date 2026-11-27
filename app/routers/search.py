@@ -321,7 +321,7 @@ def apply(body: ApplyRequest, request: Request, conn: Conn):
                 found = found.model_copy(update={"description_is_excerpt": False})
         if len(description) < 800 or found.description_is_excerpt:
             # ... or look for the same job on the company's own careers board
-            full = importers.find_on_company_board(company, title, request.app.state.fetch)
+            full = importers.find_on_company_board(company, title, request.app.state.fetch, location=location or "")
             if full is not None and len(full.description) > len(description):
                 description, url = full.description, full.source_url or url
                 location = full.location or location

@@ -29,7 +29,11 @@ def _sentences(text: str) -> list[str]:
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
 
 
-def render(resume: TailoredResume, job_title: str, company: str) -> str:
+def project_points(project: dict) -> list[str]:
+    return project.get("highlights") or _sentences(project.get("description", ""))
+
+
+def render(resume: TailoredResume, job_title: str, company: str, download_url: str | None = None) -> str:
     c = resume.contact
     contact = " | ".join(escape(x) for x in [c.get("email"), c.get("phone"), *[_short_link(u) for u in c.get("links", [])]] if x)
 
@@ -39,25 +43,30 @@ def render(resume: TailoredResume, job_title: str, company: str) -> str:
     else:
         skills = f"<p class='skill'>{escape(', '.join(resume.skills))}</p>"
 
-    def role_html(r) -> str:
+    def role_html(i, r) -> str:
         where = escape(r.company) + (f" | {escape(r.location)}" if r.location else "")
         recognition = f"<p class='recog'><b>Recognition:</b> {escape(r.recognition)}</p>" if r.recognition else ""
-        return f"""<div class="role">
+        page_break = " start-page" if i > 0 and i == resume.page_break_before_role else ""
+        return f"""<div class="role{page_break}">
           <div class="line"><b>{where}</b><b>{_month(r.start_date)} - {_month(r.end_date)}</b></div>
           <div><b>{escape(r.title)}</b></div>
           <ul>{"".join(f"<li>{escape(b.text)}</li>" for b in r.bullets)}</ul>{recognition}
         </div>"""
 
-    roles = "".join(role_html(r) for r in resume.experience)
+    roles = "".join(role_html(i, r) for i, r in enumerate(resume.experience))
 
-    projects = "".join(
-        f"""<div class="role">
+    def project_html(p):
+        points = "".join(f"<li>{escape(s)}</li>" for s in project_points(p))
+        tech = f"<b>Tech:</b> {escape(', '.join(p['skills']))}" if p.get("skills") else ""
+        if tech and not resume.print_layout:
+            points += f"<li>{tech}</li>"
+            tech = ""
+        return f"""<div class="role">
           <div class="line"><span><b>{escape(p['name'])}</b>{' | ' + escape(_short_link(p['link'])) if p.get('link') else ''}</span></div>
-          <ul>{"".join(f"<li>{escape(s)}</li>" for s in (p.get('highlights') or _sentences(p['description'])))}
-          {f"<li><b>Tech:</b> {escape(', '.join(p['skills']))}</li>" if p.get('skills') else ''}</ul>
+          <ul>{points}</ul>{f"<p class='project-tech'>{tech}</p>" if tech else ''}
         </div>"""
-        for p in resume.projects
-    )
+
+    projects = "".join(project_html(p) for p in resume.projects)
     education = "".join(
         f"<p class='plain'><b>{escape(e['degree'])}</b> | {escape(e['institution'])}<br>"
         f"{escape(e.get('location') or '')}{' | ' if e.get('location') and e.get('start_date') else ''}"
@@ -66,12 +75,17 @@ def render(resume: TailoredResume, job_title: str, company: str) -> str:
     )
     certs = "".join(f"<div>{escape(x)}</div>" for x in resume.certifications)
     achievements = "".join(f"<div>{escape(x)}</div>" for x in resume.achievements)
+    actions = (f'<a href="{escape(download_url)}">Download verified PDF</a>' if download_url else
+               'Click any text to tweak it, then <button type="button" onclick="window.print()">Print / Save as PDF</button>'
+               ' (tweaks here are not saved).')
+    experience_heading = "<h2 class='start-page'>" if resume.page_break_before_role == 0 else "<h2>"
+    compact = resume.print_layout == "compact"
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>{escape(resume.name)} - Resume - {escape(company)}</title>
 <style>
-{_page_css("0.5in", "0.6in")}
+{_page_css("0.42in" if compact else "0.5in", "0.6in")}
   body {{ font: 10.5pt/1.25 "Times New Roman", Times, serif; color:#000; max-width: 7.3in; margin: 24px auto; }}
   h1 {{ font-size: 25pt; margin: 0 0 2px; font-weight: bold; }}
   .contact {{ font-size: 10pt; margin-bottom: 6px; }}
@@ -85,11 +99,18 @@ def render(resume: TailoredResume, job_title: str, company: str) -> str:
   ul {{ margin: 2px 0 0 0; padding-left: 18px; }}
   li {{ text-align: justify; margin: 0 0 1px; }}
   .recog {{ margin-top: 2px; }}
+  .project-tech {{ margin: 2px 0 0; }}
+  .compact {{ line-height: 1.16; }}
+  .compact .resume-summary {{ line-height: 1.25; }}
+  .compact h2 {{ margin: 8px 0 4px; }}
+  .compact p.skill {{ margin-bottom: 2px; }}
+  .compact li {{ margin-bottom: 0; }}
+  .compact .role {{ margin-bottom: 5px; }}
   h2, .line, .role > div:not(.line) {{ break-after: avoid; page-break-after: avoid; }}  /* headings stay with their text */
   li, p.skill {{ break-inside: avoid; page-break-inside: avoid; }}
   .toolbar {{ font: 13px -apple-system, sans-serif; background:#eef2ff; color:#2f5bea; padding: 8px 12px;
               border-radius: 8px; margin-bottom: 16px; }}
-  @media print {{ .toolbar {{ display:none; }} body {{ margin: 0; }} }}
+  @media print {{ .toolbar {{ display:none; }} body {{ margin: 0; }} .start-page {{ break-before: page; }} }}
   .embedded .toolbar {{ display: none; }}
 </style>
 <script>if (window.self !== window.top) {{   // shown inside the app as a preview: read-only, no toolbar
@@ -97,18 +118,17 @@ def render(resume: TailoredResume, job_title: str, company: str) -> str:
   addEventListener('DOMContentLoaded', () =>
     document.querySelectorAll('[contenteditable]').forEach(e => e.setAttribute('contenteditable', 'false')));
 }}</script></head>
-<body>
+<body{' class="compact"' if compact else ''}>
 <div class="toolbar"><a href="/ui/" onclick="if (history.length > 1) {{ history.back(); return false; }}">← Back to the app</a>
   · Tailored for <b>{escape(job_title)}</b> at <b>{escape(company)}</b>.
-  Click any text to tweak it, then <button type="button" onclick="window.print()">Print / Save as PDF</button>
-  (tweaks here are not saved).</div>
-{_sheet(f'''<div class="smart-justify" data-print-width="7.3in" contenteditable="true" spellcheck="true">
+  {actions}</div>
+{_sheet(f'''<div class="smart-justify" data-print-width="7.3in" contenteditable="{'false' if download_url else 'true'}" spellcheck="true">
 <h1>{escape(resume.name)}</h1>
 <div class="contact">{contact}</div>
 <hr class="rule">
-<h2>Professional Summary</h2><p>{escape(resume.summary)}</p>
+<h2>Professional Summary</h2><p class="resume-summary">{escape(resume.summary)}</p>
 <h2>Core Skills</h2>{skills}
-<h2>Professional Experience</h2>{roles}
+{experience_heading}Professional Experience</h2>{roles}
 {f'<h2>Projects</h2>{projects}' if projects else ''}
 {f'<h2>Education</h2>{education}' if education else ''}
 {f'<h2>Certifications and Professional Development</h2>{certs}' if certs else ''}

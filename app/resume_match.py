@@ -1,22 +1,15 @@
 """Explain the technical coverage of a single résumé and surface verified evidence for it."""
 
-import re
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Literal
 
 from pydantic import BaseModel
 
-from app import ats, bank, evidence, resume_render, tailoring, vocabulary
+from app import ats, bank, resume_render, tailoring, technical_requirements
 from app.errors import ConflictError
 from app.schemas import BankRecord, JobOut, Profile
 
 
-_SAME_SKILL = {"user acceptance testing": "uat", "uat testing": "uat",
-               "continuous integration/continuous delivery": "ci/cd"}
-_AMBIGUOUS_ALIASES = {"node", "rest"}
-_NEGATED_WORK = re.compile(r"\b(?:did not|didn['’]t|never|without|no hands-on experience)\s+"
-                           r"(?:use|implement|build|test|work with|experience with)?", re.IGNORECASE)
 _ON_RESUME = {"bullet", "skills", "mention"}
 Placement = Literal["bullet", "skills", "mention", "verified", "profile", "transferable", "gap"]
 
@@ -31,9 +24,11 @@ class Requirement(BaseModel):
     keyword: str
     required: bool
     placement: Placement
+    source: str = ""
     evidence: str | None = None
     owner: str | None = None
     options: list[EvidenceOption] = []
+    needs_bank_evidence: bool = False
 
 
 class Counts(BaseModel):
@@ -49,49 +44,12 @@ class Coverage(BaseModel):
     rows: list[Requirement]
 
 
-def _canonical(term: str) -> str:
-    norm = evidence.normalize(term)
-    return _SAME_SKILL.get(norm, norm)
-
-
 def _terms(keyword: str) -> tuple[str, ...]:
-    alternatives = re.sub(r"\band\s*/\s*or\b", "or", keyword, flags=re.IGNORECASE)
-    return tuple(sorted({_canonical(term) for term in ats.skill_terms(alternatives) if vocabulary.is_technical(term)}))
-
-
-def _technical_requirements(job: JobOut):
-    seen = set()
-    for required, skills in ((True, job.required_skills), (False, job.preferred_skills)):
-        for keyword in skills:
-            if not vocabulary.is_technical(keyword) or keyword.casefold().strip() == job.title.casefold().strip():
-                continue
-            terms = _terms(keyword)
-            if terms and terms not in seen:
-                seen.add(terms)
-                yield keyword, required, terms
-
-
-@lru_cache(maxsize=512)
-def _term_forms(term: str) -> tuple[tuple[str, ...], bool]:
-    variants = (term, *(a for a, target in evidence.ALIASES.items() if target == term and a not in _AMBIGUOUS_ALIASES),
-                *(a for a, target in _SAME_SKILL.items() if target == term))
-    return variants, ats.is_named_tool(term)
+    return technical_requirements.options(keyword)
 
 
 def _mentions(text: str, terms: tuple[str, ...], *, wording_only: bool = False) -> bool:
-    for term in terms:
-        if vocabulary.canonical(term) in vocabulary.CASE_SENSITIVE:
-            names = {name for _, _, name in vocabulary.find_terms(text)}
-            if (vocabulary.canonical(term) in names or (term == "c" and text.strip() == "C")
-                    or (term == "go" and re.search(r"\b(?:in|using|with) Go\b", text))):
-                return True
-            continue
-        variants, named = _term_forms(term)
-        if any(ats.keyword_in(text, variant) for variant in variants):
-            return True
-        if not wording_only and not named and ats.resume_has(text, term):
-            return True
-    return False
+    return (technical_requirements.mentions if wording_only else technical_requirements.supports)(text, terms)
 
 
 def _destination(resume: tailoring.TailoredResume, record: BankRecord):
@@ -106,9 +64,7 @@ def _destination(resume: tailoring.TailoredResume, record: BankRecord):
 def _options(resume, records: list[BankRecord], terms: tuple[str, ...]) -> list[EvidenceOption]:
     choices = []
     for record in records:
-        if (record.caveat or not _destination(resume, record) or not _mentions(record.text, terms)
-                or any(_mentions(record.text[hit.end():].split(".", 1)[0][:60], terms, wording_only=True)
-                       for hit in _NEGATED_WORK.finditer(record.text))):
+        if record.caveat or not _destination(resume, record) or not _mentions(record.text, terms):
             continue
         choices.append(EvidenceOption(record_id=record.id, owner=record.owner, text=record.text))
         if len(choices) == 3:
@@ -135,8 +91,9 @@ def analyze(resume: tailoring.TailoredResume, profile: Profile, job: JobOut) -> 
     records = bank.verified(profile)
     profile_text = tailoring.profile_text(profile)
     rows = []
-    for keyword, required, terms in _technical_requirements(job):
-        row = Requirement(keyword=keyword, required=required, placement="gap")
+    for item in technical_requirements.for_job(job):
+        terms = item.options
+        row = Requirement(keyword=item.label, required=item.required, placement="gap", source=item.source)
         for placement, lines in (("bullet", bullets), ("skills", skills), ("mention", mentions)):
             hit = next(((line, owner) for line, owner in lines if _mentions(line, terms)), None)
             if hit:
@@ -148,14 +105,39 @@ def analyze(resume: tailoring.TailoredResume, profile: Profile, job: JobOut) -> 
         if row.placement == "gap":
             if row.options:
                 row.placement = "verified"
-            elif proof := next((found for term in terms if (found := ats.profile_evidence(profile_text, term, profile))), None):
+            elif proof := technical_requirements.profile_evidence(profile, terms):
                 row.evidence = proof
-                row.placement = "profile" if _mentions(proof.split(" (related:", 1)[0], terms) else "transferable"
+                row.placement = "profile"
+            elif related := next((r for r in records if technical_requirements.relates(r.text, terms)), None):
+                row.evidence, row.owner, row.placement = related.text, related.owner, "transferable"
+            elif proof := next((found for term in terms if (found := ats.profile_evidence(profile_text, term, profile))
+                                and "(related:" in found), None):
+                row.evidence = proof
+                row.placement = "transferable"
+        row.needs_bank_evidence = row.placement in {"gap", "transferable"} or (
+            row.placement == "profile" and not any(_mentions(record.text, terms) for record in records))
         rows.append(row)
     required, preferred = _counts(rows, True), _counts(rows, False)
     weight = 2 * required.total + preferred.total
     score = round(100 * (2 * required.covered + preferred.covered) / weight, 1) if weight else None
     return Coverage(score=score, required=required, preferred=preferred, rows=rows)
+
+
+def ats_report(coverage: Coverage) -> ats.ATSReport:
+    matched, evidenced, gaps = [], [], []
+    for row in coverage.rows:
+        keyword = ats.Keyword(keyword=row.keyword, weight=2 if row.required else 1, evidence=row.evidence)
+        if row.placement in _ON_RESUME:
+            matched.append(keyword)
+        elif row.placement in {"verified", "profile"}:
+            evidenced.append(keyword)
+        else:
+            gaps.append(keyword)
+    total = 2 * coverage.required.total + coverage.preferred.total
+    best = round(100 * sum(k.weight for k in matched + evidenced) / total, 1) if total else 0.0
+    return ats.ATSReport(method="technical_resume_coverage", compared=len(coverage.rows), score=coverage.score or 0.0,
+                         max_honest_score=best, matched=matched, missing_but_evidenced=evidenced, gaps=gaps,
+                         note="Coverage of the posting’s technical skills. Required terms count twice.")
 
 
 @dataclass

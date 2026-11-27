@@ -23,18 +23,22 @@ class ConfirmGap(StrictModel):
 
 @router.get("/experience-gaps")
 def list_gaps(conn: Conn, job_id: int | None = None):
+    from app import repository
+
     if job_id is not None:
-        from app import repository
         gap_review.ensure(conn, repository.get_job(conn, job_id))
+    else:
+        for row in conn.execute("SELECT job_id FROM applications WHERE status IN ('preparing', 'ready_for_review')").fetchall():
+            gap_review.ensure(conn, repository.get_job(conn, row["job_id"]))
     return gap_review.list_suggestions(conn, job_id)
 
 
 @router.post("/experience-gaps/{suggestion_id}/draft")
-def draft_gap(suggestion_id: int, request: Request, conn: Conn, again: bool = False):
+def draft_gap(suggestion_id: int, request: Request, conn: Conn, again: bool = False, owner: str | None = None):
     """The AI writes the line for this gap, at the employer or project where the skill fits best. Nothing is
     added to your bank until you confirm it is true."""
     from app.dependencies import llm as account_llm
-    return gap_review.draft(conn, account_llm(request), suggestion_id, again)
+    return gap_review.draft(conn, account_llm(request), suggestion_id, again, owner=owner)
 
 
 @router.post("/experience-gaps/{suggestion_id}/confirm")
@@ -51,16 +55,21 @@ class ConfirmItem(StrictModel):
 
 
 class ConfirmGaps(StrictModel):
-    items: Annotated[list[ConfirmItem], Field(min_length=1, max_length=50)]
+    items: Annotated[list[ConfirmItem], Field(min_length=1, max_length=200)]
     confirmed: Literal[True]
+    allow_partial: bool = False
+    report_errors: bool = False
 
 
 @router.post("/experience-gaps/confirm")
 def confirm_gaps(body: ConfirmGaps, request: Request, conn: Conn):
     """Add every line you confirmed as true in one go: each job's resume is then written once, for all of them."""
-    records, apps = gap_review.confirm_many(conn, [(i.id, i.owner, i.text) for i in body.items])
+    records, apps, rejected = gap_review.confirm_many(
+        conn, [(i.id, i.owner, i.text) for i in body.items],
+        allow_partial=body.allow_partial, report_errors=body.report_errors)
     prep = preparer(request)
     return {"record_ids": records, "application_ids": apps,
+            "rejected": rejected,
             "preparations": [prep.refresh_resume(aid) for aid in apps]}
 
 

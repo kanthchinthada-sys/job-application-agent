@@ -6,15 +6,12 @@ import { RouterLink } from '@angular/router';
 import { Api, ApiError } from '../../api';
 import { Job, RequirementEvidence, Requirements } from '../../models';
 
-/** The posting's requirements, each with direct evidence, related experience or a gap, and the exact records behind
- *  it. The same deterministic analysis the resume uses: no model calls. */
+/** The posting's requirements and supporting records, with a separate review form for suggested evidence. */
 @Component({
   selector: 'app-match-tab',
   imports: [FormsModule, RouterLink, GapReviewPanel],
   template: `
-    @if (job().pending_technical_gaps) {
-      <app-gap-review-panel [jobId]="job().id" (changed)="load(job().id)" />
-    }
+    <app-gap-review-panel [jobId]="job().id" (changed)="load(job().id)" />
     <div class="card" data-testid="match">
       @if (error(); as e) {
         <div class="msg bad">{{ e }}</div>
@@ -22,9 +19,8 @@ import { Job, RequirementEvidence, Requirements } from '../../models';
       } @else if (!data()) {
         <p class="muted"><span class="spinner"></span> Comparing the posting with your profile…</p>
       } @else {
-        <h3 style="margin-top:0">What this job asks for, and your evidence</h3>
-        <p class="small muted">{{ counts() }}. Only named technical skills are scored; people skills are shown by example
-          and are never a gap. Open a requirement to see the employer and experience record behind it.</p>
+        <h3 style="margin-top:0">Technical skills and your evidence</h3>
+        <p class="small muted">{{ counts() }}. Open a skill to see the posting line and supporting evidence.</p>
         @if (!data()!.has_bank) {
           <div class="msg info">Add your experience bank (Profile) for record-level evidence; without it, matches come from
             your resume and skill lists.</div>
@@ -39,6 +35,7 @@ import { Job, RequirementEvidence, Requirements } from '../../models';
                 <span class="small muted">· {{ row.kind }}{{ row.category !== 'technical' ? ' · ' + row.category : '' }}</span></span>
             </summary>
             <div class="small" style="margin-top:8px">
+              @if (row.source && row.source !== row.requirement) { <div class="muted">{{ row.source }}</div> }
               @if (row.found.length) { <div class="good">✓ Shown: {{ row.found.join(', ') }}</div> }
               @for (x of elsewhere(row); track x[0]) { <div class="good">✓ {{ x[0] }} <span class="muted">({{ x[1] }})</span></div> }
               @for (rec of row.records; track rec.id) {

@@ -44,7 +44,7 @@ def page_text(rendered_html: str) -> str:
 
 
 def check_resume(resume, profile, job, priorities: list[dict] | None = None,
-                 render=None) -> dict:
+                 render=None, recent_ai_ids=()) -> dict:
     """Check (and where safe, fix) a tailored resume in place. Returns {problems, fixed, first_third}."""
     from app import bank, core_skills
     problems: list[str] = []
@@ -134,11 +134,14 @@ def check_resume(resume, profile, job, priorities: list[dict] | None = None,
             ids = [b.source_id for b in role.bullets]
             if rid in ids:
                 pos = ids.index(rid)
-                if pos > 0:
+                pinned = ri == 0 and bool(set(recent_ai_ids).intersection(
+                    role.bullets[0].source_ids or [ids[0]]))
+                if pos > 0 and not pinned:
                     role.bullets.insert(0, role.bullets.pop(pos))
                     fixed.append(f"Moved the strongest evidence for \"{lead['ask'][:60]}\" ({rid}) to the top of "
                                  f"{role.company}")
-                first_third = {"priority": lead["ask"], "record": rid, "where": f"{role.company}, bullet 1"}
+                    pos = 0
+                first_third = {"priority": lead["ask"], "record": rid, "where": f"{role.company}, bullet {pos + 1}"}
                 break
         else:
             first_third = {"priority": lead["ask"], "record": rid, "where": "summary only (not a bullet on this page)"}

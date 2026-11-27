@@ -5,6 +5,14 @@ from fastapi.testclient import TestClient
 
 from app.api import create_app
 from app.job_intake import _company_from_url, intake, rule_fields, rule_skills
+
+
+def test_title_in_role_paragraph_beats_intro_heading():
+    fields, _ = rule_fields("About Example Travel\nWe help people book flights. As the Forward Deployed Engineer, "
+                            "AI Trust and Reliability, you make sure each deployment is ready.")
+    assert fields["title"] == "Forward Deployed Engineer, AI Trust and Reliability"
+    assert fields["company"] == "Example Travel"
+    assert rule_fields("Who are we?\nThis is a short company overview.")[0]["title"] is None
 from tests.test_importing import fake_fetch
 
 POSTING = """Senior Software Engineer in Test

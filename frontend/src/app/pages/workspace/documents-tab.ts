@@ -220,7 +220,7 @@ export class DocumentsTab {
 
   /** The checks belong to the AI draft: an edited version shows the checks of the draft it came from. */
   reviewFor(kind: Kind, d: Doc): Doc {
-    if (d.source === 'ai' || d.review?.method === 'section_edit') return d;
+    if (d.source === 'ai' || ['section_edit', 'strict_layout_repair'].includes(d.review?.method)) return d;
     return this.versionsOf(kind).find(v => v.source === 'ai' && v.version < d.version) ?? d;
   }
 

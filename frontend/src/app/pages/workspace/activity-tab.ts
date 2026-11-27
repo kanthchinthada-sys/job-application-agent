@@ -13,11 +13,12 @@ import { Activity } from '../../models';
     <div class="card" data-testid="notes">
       <h3 style="margin-top:0">Notes</h3>
       <textarea aria-label="Notes" [ngModel]="notes()" (ngModelChange)="notes.set($event); state.set('dirty')"
+                [disabled]="!activity() || state() === 'saving'"
                 placeholder="Recruiter name, salary range, follow-up dates…"></textarea>
       <div class="actions">
-        <button class="secondary" type="button" [disabled]="state() === 'saving' || state() === 'saved'" (click)="save()">Save notes</button>
+        <button class="secondary" type="button" [disabled]="!activity() || state() === 'saving' || state() === 'saved'" (click)="save()">Save notes</button>
         <span class="small" data-testid="notes-state" [class.good]="state() === 'saved'" [class.warn-text]="state() === 'dirty' || state() === 'error'">
-          @switch (state()) {
+          @switch (activity() ? state() : null) {
             @case ('saved') { ✓ Saved{{ savedAt() ? ' · ' + (savedAt() | date: 'MMM d, h:mm a') : '' }} }
             @case ('dirty') { Unsaved changes }
             @case ('saving') { Saving… }
@@ -38,6 +39,9 @@ import { Activity } from '../../models';
             }
           </ul>
         } @else { <p class="muted">No activity yet.</p> }
+      } @else if (loadError()) {
+        <p class="warn-text" role="alert">{{ loadError() }}</p>
+        <button class="secondary" type="button" (click)="load(appId())">Retry loading activity</button>
       } @else { <p class="muted"><span class="spinner"></span> Loading…</p> }
     </div>
   `,
@@ -54,6 +58,7 @@ export class ActivityTab {
   protected readonly state = signal<'saved' | 'dirty' | 'saving' | 'error'>('saved');
   protected readonly savedAt = signal<string | null>(null);
   protected readonly error = signal('');
+  protected readonly loadError = signal('');
 
   constructor() {
     effect(() => {
@@ -62,7 +67,9 @@ export class ActivityTab {
     });
   }
 
-  private async load(id: number) {
+  protected async load(id: number) {
+    this.loadError.set('');
+    this.activity.set(null);
     try {
       const a = await this.api.activity(id);
       this.activity.set(a);
@@ -70,7 +77,7 @@ export class ActivityTab {
       this.savedAt.set(a.notes ? a.notes_saved_at : null);
       this.state.set('saved');
     } catch (e) {
-      this.error.set((e as ApiError).message);
+      this.loadError.set((e as ApiError).message);
     }
   }
 

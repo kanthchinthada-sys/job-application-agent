@@ -437,14 +437,18 @@ of them is there). Keywords nothing supports are reported as **gaps**, never add
 
 1. Save a direct Greenhouse, Lever, Ashby, or Workday posting. If you saved the job from an aggregator or
    pasted the description, enter the official employer URL under **Direct employer application link**.
-   Open the application and generate a tailored résumé.
-2. In **Documents → Auto-apply**, review the posting, the profile information, and the exact résumé and optional
-   cover letter versions. Select **Approve and submit**. The app opens a visible, dedicated Chromium browser on
-   your computer and handles recognized fields and PDF uploads.
+   You can also save a direct LinkedIn job or Pinpoint application form for manual completion. Open the
+   application and generate a tailored résumé.
+2. In **Documents → Auto-apply**, review the posting, contact details from the selected résumé and profile, and
+   the exact document versions. For Greenhouse, the app shows screening questions and the employer's dropdown
+   choices before opening the form. Review any suggested or drafted answers and choose your actual clearance
+   status if asked. A cover letter is selected by default when the job accepts one and you have a draft.
+   **Approve and submit** opens a dedicated Chromium window and handles recognized fields and PDF attachments.
 3. The browser profile remembers sign-ins within your local workspace. Complete account creation, sign-in,
    verification, CAPTCHA, and consent in the employer browser when the run pauses. Answer custom questions in
-   the app or on the employer's site. For eligible written questions, **Draft answer with AI** uses your configured
-   provider so you can check its answer. Review Workday's final page, then select **Approve answers and resume auto-apply**.
+   the app or on the employer's site. Lever screening questions appear by their form labels when the run pauses.
+   For eligible written questions, **Draft answer with AI** uses your configured provider so you can check its
+   answer. Review Workday's final page, then select **Approve answers and resume auto-apply**.
 4. The app submits once and records the exact documents after it sees a confirmation. If the result is uncertain,
    check the employer portal or email. **Stop auto-apply** is available before the final submission starts.
 

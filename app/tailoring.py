@@ -16,6 +16,7 @@ The result is stored as JSON and rendered as a printable page.
 import json
 import os
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -142,6 +143,8 @@ class TailoredResume(BaseModel):
     education: list[dict]
     certifications: list[str]
     achievements: list[str]
+    print_layout: Literal["standard", "compact"] | None = None
+    page_break_before_role: int | None = None
 
 
 def _relevance(text: str, skill_words: set[str], desc_words: set[str]) -> int:
@@ -850,6 +853,10 @@ def _plan_summary_items(profile: Profile, plan) -> tuple[list, set[str]]:
     if own:
         support = [recs[r].text for r in ranked[:3]]
         items.append((OPENING, [own[0]] + support))
+    recent_ai = next((rid for rid in plan.recent_ai_ids if rid in usable), None)
+    if recent_ai:
+        items.append(("AI-assisted engineering in the current role", [recs[recent_ai].text]))
+        used.add(recent_ai)
 
     # what the job mainly asks first: required skills and the listed duties before nice-to-haves; within each,
     # what your records show directly before what they show by example
@@ -991,7 +998,7 @@ def _plan_summary_items(profile: Profile, plan) -> tuple[list, set[str]]:
         rest.remove(people)
         rest.insert(min(SUMMARY_ASKS - 1, len(rest)), people)
     # one sentence per main ask, in the order the job stresses them
-    for _ in range(SUMMARY_ASKS):
+    for _ in range(SUMMARY_ASKS - bool(recent_ai)):
         item = next_ask()
         if not item:
             break
@@ -1589,35 +1596,125 @@ def _prefit_drops(profile: Profile, job: JobOut, plan, selection, source_of: dic
 
 
 def _usable_skills(job: JobOut) -> JobOut:
-    """Jobs saved before the posting reader existed may hold whole phrases as "skills" ("take ambiguous
-    problems"). Read the keywords from the description again for this resume (the saved job is unchanged)."""
-    skills = job.required_skills + job.preferred_skills
-    if job.description and skills and sum(len(k.split()) > 3 for k in skills) / len(skills) >= 0.3:
-        from app import posting
-        req, pref = posting.keywords(job.description, 30, 15)
-        if req or pref:
-            return job.model_copy(update={"required_skills": req, "preferred_skills": pref})
-    return job
+    """Use the same technical skill list as the résumé score and Experience Bank review."""
+    from app import technical_requirements
+
+    req, pref = technical_requirements.split(job)
+    return job.model_copy(update={"required_skills": req, "preferred_skills": pref})
 
 
-def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[str, dict]:
+def enforce_strict_layout(resume: TailoredResume, profile: Profile, job: JobOut, scores=None, protect=None) -> dict:
+    from app import core_skills, final_check, linefit
+    from app.resume_render import project_points, render
+
+    scores = scores or {}
+    floors = layout.strict_role_minimums(profile)
+    own = {(r.company, r.start_date): r for r in profile.experience}
+    records = sorted(bank.verified(profile), key=lambda r: -scores.get(r.id, 0))
+    printed = {final_check._norm(b.text) for role in resume.experience for b in role.bullets}
+    originals = {final_check._norm(_first_sentence(b.original)) for role in resume.experience for b in role.bullets}
+    used_ids = {rid for role in resume.experience for b in role.bullets for rid in [b.source_id, *(b.source_ids or [])] if rid}
+    for role in resume.experience:
+        key = (role.company, role.start_date)
+        if key not in own or len(role.bullets) >= floors[key]:
+            continue
+        candidates = [(r.text, r.id) for r in records if r.owner_kind == "experience" and r.owner == role.company]
+        candidates.extend((text, None) for text in own[key].highlights)
+        for original, record_id in candidates:
+            text = _first_sentence(original)
+            normalized = final_check._norm(text)
+            if (not normalized or normalized in printed or normalized in originals or record_id in used_ids
+                    or bank.is_placeholder(text) or final_check._PLACEHOLDER.search(text)):
+                continue
+            text = text if text.endswith((".", "!", "?")) else text + "."
+            if final_check._unfinished(text):
+                continue
+            role.bullets.append(Bullet(text=text, original=original, changed=text != original, source_id=record_id))
+            printed.add(normalized)
+            if record_id:
+                used_ids.add(record_id)
+            if len(role.bullets) >= floors[key]:
+                break
+
+    groups = {g["name"].casefold() for g in resume.skill_groups if g["skills"]}
+    if len(groups) < layout.MIN_SKILL_HEADINGS:
+        pool = profile.skills + [s for g in profile.skill_groups for s in g.skills]
+        pool += [s for e in profile.experience for s in e.skills] + [s for p in profile.projects for s in p.skills]
+        _, headings, _ = core_skills.core_skills(profile, job, None, pool)
+        used = {s.casefold() for g in resume.skill_groups for s in g["skills"]}
+        for group in headings + [g.model_dump() for g in profile.skill_groups]:
+            name = group["name"].casefold()
+            skills = [s for s in group["skills"] if s.casefold() not in used]
+            if name not in groups and skills:
+                resume.skill_groups.append({"name": group["name"], "skills": skills})
+                groups.add(name)
+                used.update(s.casefold() for s in skills)
+            if len(groups) >= layout.MIN_SKILL_HEADINGS:
+                break
+        resume.skills = list(dict.fromkeys([*resume.skills, *(s for g in resume.skill_groups for s in g["skills"])]))
+
+    remaining = layout.MAX_PROJECT_POINTS
+    for project in resume.projects:
+        points = project_points(project)
+        if len(points) > remaining:
+            project["highlights"] = points[:remaining]
+            if "highlight_ids" in project:
+                project["highlight_ids"] = project["highlight_ids"][:remaining]
+            if not remaining:
+                project["description"] = ""
+        remaining -= min(remaining, len(points))
+
+    measure = lambda r: render(r, job.title, job.company)
+    opening = resume.summary.strip() or _first_sentence(profile.summary or "")
+    alternatives = [opening]
+    used = {final_check._norm(s) for s in re.split(r"(?<=[.!?])\s+", opening)}
+    reserve = re.split(r"(?<=[.!?])\s+", profile.summary or "")
+    reserve += [_first_sentence(r.text) for r in records
+                if r.owner_kind == "experience" and not r.caveat and final_check._norm(_first_sentence(r.text)) not in printed]
+    for sentence in reserve:
+        key = final_check._norm(sentence)
+        if not key or key in used or bank.is_placeholder(sentence) or final_check._PLACEHOLDER.search(sentence):
+            continue
+        sentence = sentence if sentence.endswith((".", "!", "?")) else sentence + "."
+        if final_check._unfinished(sentence):
+            continue
+        alternatives.append(f"{alternatives[-1]} {sentence}".strip())
+        used.add(key)
+        if len(alternatives) >= 7:
+            break
+    lines = linefit.browser_line_measure(measure(resume), [
+        {"key": str(i), "kind": "summary", "text": text} for i, text in enumerate(alternatives)])
+    for i, text in enumerate(alternatives):
+        if (lines[str(i)][0] if lines else summary_lines(text)) >= layout.MIN_SUMMARY_LINES:
+            if text != resume.summary:
+                resume.summary = text
+                resume.summary_source = "profile_evidence"
+            break
+    return layout.fit_strict(resume, profile, measure, scores, protect)
+
+
+def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None,
+           confirmed_gap_ids: tuple[str, ...] = ()) -> tuple[str, dict]:
     """plan: the shared job analysis (app/selection.plan) when the caller already made it."""
     from app import metrics
     shared_plan = plan
+    saved_profile = profile
+    strict = profile.resume_settings.strict_layout
     lap = metrics.Lap("resume: ")
-    job = _usable_skills(job)
+    saved_job = job
+    job = _usable_skills(saved_job)
     warnings: list[str] = []
     plan = None
     source_of: dict[str, str] = {}          # bullet text -> bank record ID
-    keep_exact: set[str] = set()            # bullets with a caveat: never reworded
+    keep_exact: set[str] = set()            # bullets with a caveat or wording just confirmed by the candidate
     if bank.verified(profile):
         # Experience bank: choose the evidence for this job first, then write around it.
-        plan = shared_plan or sel.plan(profile, job)
+        plan = sel.plan(profile, job, confirmed_gap_ids) if confirmed_gap_ids else shared_plan or sel.plan(profile, job)
         records = {r.id: r for r in profile.experience_bank}
         for ids in plan.selected.values():
             for rid in ids:
                 source_of[records[rid].text] = rid
-                if records[rid].caveat:
+                if records[rid].caveat or rid in confirmed_gap_ids:
                     keep_exact.add(records[rid].text)
         profile = sel.working_profile(profile, plan)
         selection = [(i, list(e.highlights), 0) for i, e in enumerate(profile.experience)]
@@ -1751,8 +1848,9 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
         summary, summary_notes = compose_summary(llm, profile, job, selection, support, answers=summary_answers,
                                                  plan=plan, checks=summary_checks)
         source, moved = "composed", []
+    move_from_roles = set(moved) - set(plan.recent_ai_ids if plan else [])
     for role in roles:
-        role.bullets = [x for x in role.bullets if x.source_id not in moved]
+        role.bullets = [x for x in role.bullets if x.source_id not in move_from_roles]
     # A summary sentence condenses 1-2 of your bullets, so check it against those bullets together.
     # Every line you wrote yourself counts as evidence: your bullets, projects and verified experience records.
     own_lines = ([h for e in profile.experience for h in e.highlights] + [h for p in profile.projects for h in p.highlights]
@@ -1803,7 +1901,7 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
         if lines_groups:
             chosen_skills, chosen_groups = lines_skills, lines_groups
     if writer is not None:
-        if len(writer["skill_lines"]) >= 6:
+        if len(writer["skill_lines"]) >= (layout.MIN_SKILL_HEADINGS if strict else 6):
             # the AI's Core Skills lines, in the posting's terms, each skill backed by your profile or records
             chosen_groups = writer["skill_lines"]
             chosen_skills = [x for g in chosen_groups for x in g["skills"]]
@@ -1826,7 +1924,9 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
         achievements=profile.achievements,
     )
     lap("fact checks (bullets + summary)")
-    ats_before, ats_after, keywords_added = ats_pass(resume, profile, job)
+    from app import resume_match
+    ats_before = resume_match.ats_report(resume_match.analyze(resume, saved_profile, saved_job))
+    _, _, keywords_added = ats_pass(resume, profile, job)
     lap("ATS keywords")
     if plan is not None:
         # ids of the project bullets, so the page fitting knows which matter most (never printed)
@@ -1834,13 +1934,13 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
         for pr in resume.projects:
             pr["highlight_ids"] = [records.get(h) for h in pr.get("highlights", [])]
     from app.resume_render import render as render_resume
-    page_fit = layout.fit_measured(resume, lambda r: render_resume(r, job.title, job.company),
+    protect = (job.required_skills + job.preferred_skills + [k["keyword"] for k in keywords_added]
+               + (sel.named_skills(profile, plan) if plan is not None else []))
+    page_fit = {} if strict else layout.fit_measured(resume, lambda r: render_resume(r, job.title, job.company),
                                    plan.scores if plan is not None else None,
                                    ai_or_fde=bool(plan and {"FDE", "AI Test/Evaluation", "AI/ML Engineer"} & set(plan.role_types[:2])),
                                    min_bullets=profile.resume_settings.min_bullets,
-                                   protect=job.required_skills + job.preferred_skills
-                                   + [k["keyword"] for k in keywords_added]
-                                   + (sel.named_skills(profile, plan) if plan is not None else []))
+                                   protect=protect)
     lap("page fitting (2 pages, browser)")
     # lines that would print with big gaps between words: reorder/extend skill lines, re-length bullets honestly
     from app import linefit
@@ -1862,12 +1962,25 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
     line_fit = linefit.polish(None, resume, profile, job, lambda r: render_resume(r, job.title, job.company),
                               fill_skills=not skills_review)
     lap("line spacing fix (browser)")
-    # score the resume as it will actually be printed (after fitting it on the page)
-    ats_after = ats.analyze(resume_text(resume), profile_text(profile), job.required_skills, job.preferred_skills,
-                            {k.lower() for k in job.required_skills + job.preferred_skills
-                             if preferences.check_title(job.title, [k])[0] == "strong"}, profile)
+    internal = sel.internal_names(profile) if plan is not None else {}
+    from app import final_check
+    final = final_check.check_resume(resume, profile, job, plan.priorities if plan is not None else None,
+                                     render=lambda r: render_resume(r, job.title, job.company),
+                                     recent_ai_ids=plan.recent_ai_ids if plan else ())
+    if strict:
+        page_fit = enforce_strict_layout(resume, saved_profile, job, plan.scores if plan else None, protect)
+        source = resume.summary_source
+    if confirmed_gap_ids:
+        printed_ids = {rid for role in resume.experience for b in role.bullets for rid in [b.source_id, *b.source_ids]}
+        printed_ids.update(rid for p in resume.projects for rid in p.get("highlight_ids", []))
+        omitted_gaps = [r.group or r.id for r in bank.verified(saved_profile)
+                        if r.id in confirmed_gap_ids and r.id not in printed_ids]
+        if omitted_gaps:
+            warnings.append(f"Saved to the Experience Bank but left out of this résumé: {', '.join(omitted_gaps)}.")
+    # Score the exact content of the final version.
+    ats_after = resume_match.ats_report(resume_match.analyze(resume, saved_profile, saved_job))
     warnings += page_fit.pop("warnings", [])
-    if page_fit.get("measured") and page_fit.get("printed_pages") is not None:
+    if not strict and page_fit.get("measured") and page_fit.get("printed_pages") is not None:
         final = layout.browser_measure(render_resume(resume, job.title, job.company))   # after line fitting
         if final is not None:
             page_fit["printed_pages"] = final[1]
@@ -1880,12 +1993,6 @@ def tailor(llm: LLMClient, profile: Profile, job: JobOut, plan=None) -> tuple[st
         else:
             warnings.append(f"Could not fit on {page_fit['max_pages']} pages "
                             f"(about {page_fit.get('printed_pages') or page_fit['estimated_pages']} pages).")
-    internal = sel.internal_names(profile) if plan is not None else {}
-    # the last read before handing it back: names, titles, dates, placeholders, merged or unfinished text,
-    # duplicates, skills in the wrong line, the strongest evidence near the top, and the export's reading order
-    from app import final_check
-    final = final_check.check_resume(resume, profile, job, plan.priorities if plan is not None else None,
-                                     render=lambda r: render_resume(r, job.title, job.company))
     printed_skills = {s.lower(): group["name"] for group in resume.skill_groups for s in group["skills"]}
     skills_review = [{**entry, "line": printed_skills[entry["skill"].lower()]}
                      for entry in skills_review if entry["skill"].lower() in printed_skills]

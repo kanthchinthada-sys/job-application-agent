@@ -77,6 +77,15 @@ AI_CORE = re.compile(r"\b(llm|llm-generated|language models?|ollama|prompts?|pro
                      re.IGNORECASE)
 AI_TERMS = re.compile(r"\b(llm|language models?|ollama|model|models|prompt|prompts|generated|agent|evaluation|"
                       r"claim|ai)\b", re.IGNORECASE)
+APPLIED_AI = re.compile(r"\b(ai|ai/ml|ml|llms?|machine learning|language models?|rag|retrieval.augmented|"
+                       r"agentic|genai|prompt engineering|model evaluation)\b", re.IGNORECASE)
+_AI_ROLE_WORK = re.compile(r"\b(?:build\w*|develop\w*|design\w*|deploy\w*|ship\w*|train\w*|test\w*|"
+                           r"evaluat\w*|implement\w*|maintain\w*|experience|proficien\w*|hands.on)\b", re.I)
+_RECENT_AI_EVIDENCE = (
+    re.compile(r"\b(?:verified|evaluated|reviewed|validated|checked|cross.checked)\b.{0,45}\b(?:ai|llm)[ -]generated\b", re.I),
+    re.compile(r"\brag.style retrieval\b|\bretrieval.augmented generation\b|\bvector retrieval\b", re.I),
+    re.compile(r"\b(?:claude code|github copilot|llm.assisted coding|ai.assisted (?:coding|development))\b", re.I),
+)
 
 WEIGHT = {"required": 3.0, "responsibility": 1.5, "preferred": 1.2}
 # Requirements that are only soft skills ("clear communication", "take ownership") are real, but a recruiter
@@ -115,6 +124,7 @@ class Plan(BaseModel):
     role_scores: dict[str, int]
     requirements: list[Requirement]
     selected: dict[str, list[str]]           # owner -> record IDs in resume order
+    recent_ai_ids: list[str] = []
     rows: list[Row]
     gaps: list[str]
     excluded_by_status: list[str]            # "QM03 (unverified): matches 'capacity planning'"
@@ -343,7 +353,7 @@ def internal_names(profile: Profile) -> dict[str, list[str]]:
     return out
 
 
-def plan(profile: Profile, job: JobOut) -> Plan:
+def plan(profile: Profile, job: JobOut, confirmed_gap_ids: tuple[str, ...] = ()) -> Plan:
     from app import scorecard
     fam = scorecard.family(job.title, job.description)
     role_types, role_scores = classify(job)
@@ -381,8 +391,11 @@ def plan(profile: Profile, job: JobOut) -> Plan:
     rarity = {(qi, part): part_rarity[part] for parts_by_q in hits.values() for qi, parts in parts_by_q.items()
               for part in parts}
 
-    ai_job = bool(re.search(r"\b(ml|machine learning|llm|ai|model|models|generative|inference)\b",
-                            f"{job.title} {job.description}", re.IGNORECASE))
+    applied_ai = bool(APPLIED_AI.search(job.title) or any(
+        q.kind in {"required", "responsibility"} and APPLIED_AI.search(q.text) and _AI_ROLE_WORK.search(q.text)
+        for q in reqs))
+    ai_job = applied_ai or bool(re.search(r"\b(models?|generative|inference|machine learning|llm|ai|ml)\b",
+                                         f"{job.title} {job.description}", re.I))
 
     # how much the posting stresses each focus theme (0..1), with a floor so the focus always applies a little
     posting = f" {job.title} {job.description} ".lower()
@@ -459,7 +472,9 @@ def plan(profile: Profile, job: JobOut) -> Plan:
 
     def cap(r: BankRecord) -> int:
         if r.owner_kind == "project":
-            return next((MAX_PROJECT[t] for t in role_types[:1] if t in MAX_PROJECT), MAX_PROJECT["default"])
+            from app.layout import MAX_PROJECT_POINTS
+            limit = next((MAX_PROJECT[t] for t in role_types[:1] if t in MAX_PROJECT), MAX_PROJECT["default"])
+            return min(limit, MAX_PROJECT_POINTS) if settings.strict_layout else limit
         base = max_per_role[min(order.get(r.owner, 99), len(max_per_role) - 1)]
         if fam.name in ("lead", "data_lead", "manager") and r.owner == lead_role:
             base += 2                       # lead roles: your test-lead experience carries more of the story
@@ -470,6 +485,20 @@ def plan(profile: Profile, job: JobOut) -> Plan:
     chosen: list[str] = []
     per_owner: dict[str, int] = {}
     duplicates: list[str] = []
+    confirmed_order = {rid: i for i, rid in enumerate(confirmed_gap_ids)}
+
+    def choose(rid: str) -> None:
+        owner = by_id[rid].owner
+        chosen.append(rid)
+        per_owner[owner] = per_owner.get(owner, 0) + 1
+        for qi, parts in hits.get(rid, {}).items():
+            for part, v in parts.items():
+                covered[(qi, part)] = max(covered.get((qi, part), 0.0), v)
+
+    for rid in confirmed_gap_ids:
+        if (r := by_id.get(rid)) is not None and per_owner.get(r.owner, 0) < cap(r):
+            choose(rid)
+    protected = set(chosen)
 
     def too_similar(r: BankRecord) -> str | None:
         w = _words(r.text)
@@ -513,11 +542,7 @@ def plan(profile: Profile, job: JobOut) -> Plan:
             duplicates.append(f"{best} (too close to {dup})")
             candidates.remove(best)
             continue
-        chosen.append(best)
-        per_owner[by_id[best].owner] = per_owner.get(by_id[best].owner, 0) + 1
-        for qi, parts in hits[best].items():
-            for part, v in parts.items():
-                covered[(qi, part)] = max(covered.get((qi, part), 0.0), v)
+        choose(best)
 
     # --- depth: also keep strongly relevant records (distinct evidence of what the job stresses) -------------
     if chosen:
@@ -542,7 +567,7 @@ def plan(profile: Profile, job: JobOut) -> Plan:
         pool = sorted((r for r in records if r.owner == company and r.id not in chosen),
                       key=lambda r: -(relevance(r.id) + boost(r.id)))
         for r in pool:
-            if per_owner.get(company, 0) >= minimum:
+            if per_owner.get(company, 0) >= (min(minimum, cap(r)) if idx is None else minimum):
                 break
             if too_similar(r):
                 continue
@@ -550,7 +575,6 @@ def plan(profile: Profile, job: JobOut) -> Plan:
             per_owner[company] = per_owner.get(company, 0) + 1
 
     # --- most recent role: at least one bullet for each focus theme the posting stresses ---------------------
-    protected: set[str] = set()
     if current:
         for theme, weight in sorted(stress.items(), key=lambda kv: -kv[1]):
             if weight < 0.5:
@@ -570,6 +594,32 @@ def plan(profile: Profile, job: JobOut) -> Plan:
                     per_owner[current] = per_owner.get(current, 0) + 1
                     protected.add(r.id)
                     break
+
+    recent_ai_ids: list[str] = []
+    if applied_ai and "ai" in focus_themes and current:
+        recent = [r for r in records if r.owner_kind == "experience" and r.owner == current]
+        for pattern in _RECENT_AI_EVIDENCE:
+            matches = [r for r in recent if r.id not in recent_ai_ids and pattern.search(r.text)]
+            matches.sort(key=lambda r: -(relevance(r.id) + boost(r.id) + action(r.id)))
+            for r in matches:
+                if r.id not in chosen:
+                    overlap = too_similar(r)
+                    if overlap in protected:
+                        continue
+                    replace = overlap
+                    if not replace and per_owner[current] >= cap(r):
+                        replace = min((i for i in chosen if by_id[i].owner == current and i not in protected),
+                                      key=lambda i: relevance(i) + boost(i) + action(i), default=None)
+                        if not replace:
+                            continue
+                    if replace:
+                        chosen.remove(replace)
+                    else:
+                        per_owner[current] += 1
+                    chosen.append(r.id)
+                recent_ai_ids.append(r.id)
+                protected.add(r.id)
+                break
 
     # --- AI/ML job: the project section leads with the LLM work (at least 5 such records if you have them) ---
     if ai_job:
@@ -602,7 +652,10 @@ def plan(profile: Profile, job: JobOut) -> Plan:
     tech_parts = {qi: set(technical_parts(q, vocab)) | {p for p in q.parts if p in ev.RELATED and not SOFT.search(p)}
                   for qi, q in enumerate(reqs)}
     value = {rid: relevance(rid) + boost(rid) + action(rid) for rid in chosen}
-    for rid in sorted(chosen, key=lambda x: (core_first(x), -(4 * must_direct(x) + value[x]), position[x])):
+    recent_order = {rid: i for i, rid in enumerate(recent_ai_ids)}
+    for rid in sorted(chosen, key=lambda x: (confirmed_order.get(x, len(confirmed_order)),
+                                             recent_order.get(x, len(recent_order)), core_first(x),
+                                             -(4 * must_direct(x) + value[x]), position[x])):
         selected.setdefault(by_id[rid].owner, []).append(rid)
 
     # each bullet a distinct purpose: one that proves only what a stronger bullet in the same role already proves
@@ -703,10 +756,12 @@ def plan(profile: Profile, job: JobOut) -> Plan:
                 excluded.append(f"{r.id} ({r.status.replace('_', ' ')}): could show '{q.text[:60]}'")
 
     return Plan(
-        role_types=role_types, role_scores=role_scores, requirements=reqs, selected=selected, rows=rows,
+        role_types=role_types, role_scores=role_scores, requirements=reqs, selected=selected,
+        recent_ai_ids=recent_ai_ids, rows=rows,
         gaps=gaps, excluded_by_status=list(dict.fromkeys(excluded)), removed_as_duplicate=duplicates,
         caveats={rid: by_id[rid].caveat for rid in chosen if by_id[rid].caveat}, eligibility=eligibility,
-        scores={rid: round(value[rid] + (50 if rid in protected else 0), 2) for rid in chosen},
+        scores={rid: round(value[rid] + (1000 if rid in confirmed_order else 50 if rid in protected else 0), 2)
+                for rid in chosen},
         family=fam.name, why={rid: role_pts[rid][1] for rid in chosen if role_pts.get(rid, (0, []))[1]},
     )
 

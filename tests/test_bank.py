@@ -302,6 +302,34 @@ def test_ai_job_puts_llm_project_work_first_and_respects_minimums():
     assert len(sdet.selected["Tailspin Labs"]) == 2
 
 
+def test_ai_focus_leads_with_three_distinct_verified_examples_from_the_latest_role():
+    from app.schemas import BankRecord
+    from app.tailoring import summary_items
+
+    p = with_bank(resume_settings={"current_role_focus": ["ai"], "strict_layout": True})
+    current = p.experience[0].company
+    samples = [
+        ("CH31", "Evaluated AI-generated failure explanations against application logs and reproducible regression results (fictional)."),
+        ("CH32", "Validated RAG-style retrieval over diagnostic logs using Java automation (fictional)."),
+        ("CH33", "Used Claude Code to trace code paths and identify missing regression scenarios (fictional)."),
+        ("CH34", "Built an LLM agent for customer deployment (fictional and unverified)."),
+    ]
+    p.experience_bank.extend(BankRecord(id=rid, text=text, owner=current, owner_kind="experience",
+                                        status="unverified" if rid == "CH34" else "verified") for rid, text in samples)
+    target = job("Forward Deployed Engineer", "Responsibilities:\nDeploy agentic applications, validate RAG retrieval "
+                 "and evaluate LLM outputs before release.\n\nRequired Qualifications:\nJava and Kubernetes.")
+    plan = selection.plan(p, target)
+    assert plan.recent_ai_ids == ["CH31", "CH32", "CH33"]
+    assert plan.selected[current][:3] == plan.recent_ai_ids
+    assert "CH34" not in plan.selected[current] and all(len(plan.selected.get(project.name, [])) <= 5 for project in p.projects)
+    _, items, _, _, _ = summary_items(p, target, plan)
+    assert items[1][1] == [samples[0][1]]
+    assert not selection.plan(p, SDET_JOB).recent_ai_ids
+    adjacent = job("Senior SDET", "Secure every identity, from AI to human.\n\nRequired Qualifications:\n"
+                   "Java test automation with REST Assured\n\nPreferred Qualifications:\nUsing AI tools to create tests.")
+    assert not selection.plan(p, adjacent).recent_ai_ids
+
+
 def test_cover_letter_uses_verified_bank_records_and_skips_the_degree(client, fake_llm):
     p = with_bank()
     client.put("/profile", json=json.loads(p.model_dump_json()))

@@ -20,6 +20,19 @@ type Tab = 'documents' | 'match' | 'activity' | 'interview';
       <a class="back" routerLink="/applications" data-testid="back">← Back to applications</a>
       @if (app(); as a) {
         <h2 data-testid="workspace-title">{{ a.job_title }}</h2>
+        @if (editingTitle()) {
+          <div class="panel small">
+            <label for="workspace-job-title">Job title</label>
+            <input id="workspace-job-title" maxlength="300" [(ngModel)]="jobTitle" (keyup.enter)="saveTitle()">
+            <div class="actions">
+              <button type="button" class="secondary" [disabled]="savingTitle() || !jobTitle.trim()" (click)="saveTitle()">Save job title</button>
+              <button type="button" class="link-btn" [disabled]="savingTitle()" (click)="editingTitle.set(false)">Cancel</button>
+            </div>
+            @if (titleError()) { <p role="alert">{{ titleError() }}</p> }
+          </div>
+        } @else {
+          <button type="button" class="link-btn small" (click)="editTitle(a.job_title)">Edit job title</button>
+        }
         <div class="meta">
           <span><b>{{ a.company }}</b></span>
           @if (job()?.location) { <span>· {{ job()!.location }}</span> }
@@ -114,6 +127,10 @@ export class WorkspacePage {
   protected readonly pretty = pretty;
   protected readonly submissionDocs = signal<Doc[]>([]);
   protected readonly actionMessage = signal('');
+  protected readonly editingTitle = signal(false);
+  protected readonly savingTitle = signal(false);
+  protected readonly titleError = signal('');
+  protected jobTitle = '';
   protected nextAction = '';
   protected dueDate = '';
   protected interviewAt = '';
@@ -135,6 +152,7 @@ export class WorkspacePage {
       untracked(() => {
         window.scrollTo(0, 0);                       // a new application opens at the top
         this.app.set(null); this.job.set(null); this.error.set('');
+        this.editingTitle.set(false);
         if (id) this.load(id);
       });
     });
@@ -161,6 +179,32 @@ export class WorkspacePage {
     const a = this.app();
     if (!a) return;
     try { this.app.set(await this.api.application(a.id)); } catch { /* keep what is shown */ }
+  }
+
+  protected editTitle(title: string) {
+    this.jobTitle = title;
+    this.titleError.set('');
+    this.editingTitle.set(true);
+  }
+
+  protected async saveTitle() {
+    const application = this.app();
+    const title = this.jobTitle.trim();
+    if (!application || !title || this.savingTitle()) return;
+    this.savingTitle.set(true);
+    this.titleError.set('');
+    try {
+      const job = await this.api.updateJob(application.job_id, { title });
+      if (this.app()?.id === application.id) {
+        this.job.set(job);
+        this.app.update(current => current ? { ...current, job_title: job.title } : current);
+        this.editingTitle.set(false);
+      }
+    } catch (e) {
+      this.titleError.set((e as ApiError).message);
+    } finally {
+      this.savingTitle.set(false);
+    }
   }
 
   go(tab: Tab) {

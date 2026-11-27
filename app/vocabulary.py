@@ -41,10 +41,12 @@ TOOLS = [
     "Azure Data Factory", "pandas", "Tableau", "Power BI", "Looker",
     # AI / ML
     "LLM", "RAG", "MCP", "LangChain", "LangGraph", "LlamaIndex", "OpenAI", "Claude", "GPT", "Gemini",
-    "AWS Bedrock", "Vertex AI", "Hugging Face", "PyTorch", "TensorFlow", "scikit-learn", "MLflow", "Ollama",
+    "AWS Bedrock", "Vertex AI", "Vertex AI Search", "Gemini Enterprise", "Gemini CLI", "Google ADK", "Codex",
+    "LangSmith", "Langfuse", "Promptfoo", "DeepEval", "RAGAS", "pgvector", "Hugging Face", "PyTorch",
+    "TensorFlow", "scikit-learn", "MLflow", "Ollama",
     "vector databases", "embeddings", "fine-tuning", "GitHub Copilot", "Claude Code", "Cursor", "n8n",
     # business tools often asked of FDE / solutions roles
-    "Salesforce", "HubSpot", "ServiceNow", "SAP", "Workday", "Slack", "Zapier", "Make",
+    "Salesforce", "HubSpot", "ServiceNow", "SAP", "Workday", "Slack", "Zapier", "Make", "GDS", "NDC",
 ]
 
 PRACTICES = [
@@ -65,11 +67,12 @@ PRACTICES = [
     "SSO", "encryption", "compliance", "Agile", "Scrum", "Kanban", "SDLC", "version control",
     # data
     "data pipelines", "ETL", "ELT", "data modeling", "data quality", "data warehouse", "data lake",
-    "data validation", "analytics",
+    "data validation", "analytics", "data engineering", "data integration",
     # AI
     "machine learning", "deep learning", "generative AI", "AI agents", "agentic workflows", "multi-agent systems",
     "prompt engineering", "evaluation frameworks", "LLM evaluation", "prompt injection", "guardrails", "NLP",
-    "computer vision", "MLOps", "model deployment", "semantic search", "conversational AI",
+    "computer vision", "MLOps", "model deployment", "model training", "model serving", "model evaluation",
+    "production ML systems", "vector search", "semantic search", "conversational AI",
     # customer-facing / FDE / solutions
     "customer-facing", "pre-sales", "technical discovery", "solution architecture", "solution design",
     "proof of concept", "prototyping", "requirements gathering", "stakeholder management", "technical workshops",
@@ -106,11 +109,16 @@ ALIASES = {
     "sparksql": "SparkSQL", "spark sql": "SparkSQL", "xray test management": "Xray", "webdriver io": "WebdriverIO",
     "selenium webdriver": "Selenium WebDriver", "ms sql": "SQL Server", "mssql": "SQL Server",
     "amazon bedrock": "AWS Bedrock", "bedrock": "AWS Bedrock", "chatgpt": "GPT", "openai api": "OpenAI",
+    "production machine learning systems": "production ML systems", "serve the models": "model serving",
+    "serve models in production": "model serving", "train models": "model training",
+    "evaluate production ml models": "model evaluation", "model evaluations": "model evaluation",
+    "agent development kit": "Google ADK", "prompt foo": "Promptfoo",
 }
 
 # words that are skills only in their exact case / form (avoid "Go" in "go above", "C" in "C-level")
 CASE_SENSITIVE = {"Go", "C", "R", "Make", "Claude", "Gemini", "Cursor", "Express", "Lambda", "Swift", "Rails",
-                  "Spark", "Rust", "Dart", "SAP", "IAM", "S3", "SNS", "SQS", "EC2", "GPT", "MCP", "RAG", "LLM"}
+                  "Spark", "Rust", "Dart", "SAP", "IAM", "S3", "SNS", "SQS", "EC2", "GPT", "MCP", "RAG", "LLM",
+                  "GDS", "NDC"}
 
 ALL: list[str] = list(dict.fromkeys(TOOLS + PRACTICES))
 _CANON = {t.lower(): t for t in ALL}

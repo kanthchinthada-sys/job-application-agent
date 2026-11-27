@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     description      TEXT NOT NULL,
     required_skills  TEXT NOT NULL,        -- JSON list of strings
     preferred_skills TEXT NOT NULL,        -- JSON list of strings
+    technical_skills_override INTEGER NOT NULL DEFAULT 0,
     created_at       TEXT NOT NULL
 );
 
@@ -170,6 +171,8 @@ def init_db(db_path: Path) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(SCHEMA)
+        if "technical_skills_override" not in {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}:
+            conn.execute("ALTER TABLE jobs ADD COLUMN technical_skills_override INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     finally:
         conn.close()

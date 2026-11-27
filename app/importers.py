@@ -263,12 +263,17 @@ def company_slugs(company: str) -> list[str]:
 
 
 def find_on_company_board(company: str, title: str, fetch: Fetcher = http_fetch,
-                          same_title: Callable[[str, str], bool] | None = None) -> ImportedJob | None:
+                          same_title: Callable[[str, str], bool] | None = None, *,
+                          location: str = "") -> ImportedJob | None:
     """The same job on the company's own Greenhouse / Lever / Ashby board (public APIs), with its full description.
 
     Only an exact-enough title match counts (both ways), so a different job is never taken by mistake."""
     from app.preferences import check_title
     same_title = same_title or (lambda a, b: check_title(a, [b])[0] == "strong" and check_title(b, [a])[0] == "strong")
+    def place_words(text: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9]{2,}", text.lower())) - {"remote", "hybrid", "onsite", "on", "in"}
+
+    wanted_place = place_words(location)
     for slug in company_slugs(company):
         for provider in ("greenhouse", "lever", "ashby"):
             link = BoardLink(provider=provider, board=slug, job_id=None)
@@ -276,11 +281,15 @@ def find_on_company_board(company: str, title: str, fetch: Fetcher = http_fetch,
                 postings = list_board(link, fetch)
             except Exception:                       # no such board, or not reachable: try the next one
                 continue
-            hit = next((p for p in postings if same_title(p.title, title)), None)
-            if hit is None:
+            candidates = [p for p in postings if same_title(p.title, title)]
+            if wanted_place and candidates:
+                scores = [len(wanted_place & place_words(p.location)) for p in candidates]
+                best = max(scores)
+                candidates = [p for p, score in zip(candidates, scores) if score == best and score > 0]
+            if len(candidates) != 1:
                 continue
             try:
-                return fetch_job(parse_link(hit.source_url), fetch)
+                return fetch_job(parse_link(candidates[0].source_url), fetch)
             except Exception:
                 return None
     return None

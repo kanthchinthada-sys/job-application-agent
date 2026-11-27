@@ -34,6 +34,8 @@ const UNKNOWN_COMPANY = 'Unknown company';
         <label for="j-desc">Job description</label>
         <textarea id="j-desc" [(ngModel)]="description" placeholder="Paste the full job description here" style="min-height:220px"></textarea>
         <div class="row">
+          <div><label for="j-title">Job title <span class="muted">(optional)</span></label>
+            <input id="j-title" [(ngModel)]="titleIn" placeholder="Read from the posting if left empty"></div>
           <div><label for="j-url2">Link to the posting <span class="muted">(optional)</span></label>
             <input id="j-url2" [(ngModel)]="url" placeholder="https://…"></div>
           <div><label for="j-company">Company <span class="muted">(optional: kept exactly as you type it)</span></label>
@@ -132,6 +134,7 @@ export class AddJobPage implements OnDestroy {
   protected readonly editMsg = signal<Msg | null>(null);
   protected readonly preparing = signal(false);
   protected readonly companyIn = signal('');
+  protected readonly titleIn = signal('');
   protected readonly review = signal<string[]>([]);
   protected readonly notes = signal<string[]>([]);
   protected readonly aiState = signal<string>('not_needed');
@@ -217,7 +220,7 @@ export class AddJobPage implements OnDestroy {
   reset() {
     this.stopPolling();
     this.review.set([]); this.notes.set([]); this.aiState.set('not_needed'); this.applied.set([]); this.kept.set([]);
-    this.mine.clear(); this.companyIn.set('');
+    this.mine.clear(); this.companyIn.set(''); this.titleIn.set('');
     this.added.set(null); this.duplicate.set(null); this.msg.set(null); this.editMsg.set(null);
     this.url.set(''); this.description.set('');
   }
@@ -239,9 +242,10 @@ export class AddJobPage implements OnDestroy {
     this.added.set(null);
     this.msg.set({ kind: 'info', text: 'Reading the posting…' });
     try {
-      const body: { url: string | null; description: string | null; allow_duplicate: boolean; company?: string } =
+      const body: { url: string | null; description: string | null; allow_duplicate: boolean; company?: string; title?: string } =
         { url: url || null, description: description || null, allow_duplicate: allowDuplicate };
       if (this.mode() === 'paste' && this.companyIn().trim()) body.company = this.companyIn().trim();
+      if (this.mode() === 'paste' && this.titleIn().trim()) body.title = this.titleIn().trim();
       const r = await this.api.quickAddJob(body);
       const j = r.job;
       this.added.set(r);

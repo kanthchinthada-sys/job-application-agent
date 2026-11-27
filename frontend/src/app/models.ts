@@ -209,6 +209,7 @@ export interface Preparation {
   failed_steps?: Record<string, string>; steps?: string[];
 }
 export interface RequirementEvidence {
+  source?: string;
   requirement: string; kind: string; category: 'technical' | 'soft skill' | 'education'; strength: string;
   evidence: string; found: string[]; missing: string[]; found_elsewhere: Record<string, string>;
   records: { id: string; owner: string; text: string }[];
@@ -223,7 +224,7 @@ export interface Activity { application_id: number; notes: string; notes_saved_a
 export interface GapSuggestion {
   id: number; job_id: number; job_title: string; job_company: string;
   skill: string; requirement: string; owner_hint: string | null; example: string;
-  draft_owner?: string | null; draft_text?: string | null; draft_note?: string | null;
+  draft_owner?: string | null; draft_text?: string | null; draft_note?: string | null; draft_is_example?: boolean;
 }
 export interface SearchFilters { title: string; country: string; date_from: string; date_to: string; }
 export interface SearchPreset { id: number; name: string; filters: SearchFilters; last_run_at: string | null; }
@@ -258,11 +259,13 @@ export interface VerifiedEvidence {
 
 export interface TechnicalRequirement {
   keyword: string;
+  source?: string;
   required: boolean;
   placement: 'bullet' | 'skills' | 'mention' | 'verified' | 'profile' | 'transferable' | 'gap';
   evidence: string | null;
   owner: string | null;
   options: VerifiedEvidence[];
+  needs_bank_evidence?: boolean;
 }
 
 export interface TechnicalCoverage {
@@ -295,6 +298,16 @@ export interface AutoApplyQuestion {
   options: string[];
   manual: boolean;
   draftable: boolean;
+  required?: boolean;
+  multiple?: boolean;
+  suggested?: string;
+  source?: string;
+}
+
+export interface AutoApplyScreening {
+  questions: AutoApplyQuestion[];
+  cover_letter: boolean | null;
+  warning?: string;
 }
 
 export interface AutoApplyRun {
@@ -304,11 +317,13 @@ export interface AutoApplyRun {
   resume_id: number | null;
   cover_letter_id: number | null;
   evidence: string | null;
+  uploaded?: string[];
 }
 
 export interface AutoApplySetup {
   supported: boolean;
   reason?: string;
+  manual_url?: string | null;
   provider?: string;
   url?: string;
   preview?: string;
@@ -327,5 +342,6 @@ export interface AutoApplyApproval {
   resume_id: number;
   cover_letter_id: number | null;
   answers: Record<string, string>;
+  screening_answers?: Record<string, string>;
   reviewed_in_browser: boolean;
 }

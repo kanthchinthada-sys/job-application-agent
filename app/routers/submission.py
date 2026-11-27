@@ -124,10 +124,17 @@ def _local_browser(request: Request) -> bool:
 
 
 @router.get("/applications/{application_id}/auto-apply")
-def automatic_setup(application_id: Id, request: Request, conn: Conn):
+def automatic_setup(application_id: Id, request: Request, conn: Conn, resume_id: int | None = None):
     if not _local_browser(request):
         return {"supported": False, "reason": "Auto-apply is available from the app on your local computer."}
-    return auto_apply.setup(conn, application_id)
+    return auto_apply.setup(conn, application_id, resume_id)
+
+
+@router.get("/applications/{application_id}/auto-apply/screening")
+def automatic_screening(application_id: Id, request: Request, conn: Conn, resume_id: int | None = None):
+    if not _local_browser(request):
+        raise HTTPException(403, "Auto-apply is available from the app on your local computer.")
+    return auto_apply.screening_fields(conn, application_id, request.app.state.fetch, resume_id)
 
 
 class PortalLink(BaseModel):
@@ -146,7 +153,13 @@ def automatic_submit(application_id: Id, body: auto_apply.Approval, request: Req
     """Start or continue the approved local browser run for this exact application and document versions."""
     if not _local_browser(request):
         raise HTTPException(403, "Auto-apply is available from the app on your local computer.")
-    run, token = auto_apply.enqueue(conn, application_id, body)
+    screening = None
+    if body.screening_answers is not None:
+        plan = auto_apply.screening_fields(conn, application_id, request.app.state.fetch, body.resume_id)
+        if plan["cover_letter"] is False and body.cover_letter_id is not None:
+            raise ConflictError("This form does not offer a cover letter upload. Review the selected materials.")
+        screening = auto_apply.review_screening(plan, body.screening_answers)
+    run, token = auto_apply.enqueue(conn, application_id, body, screening)
     if token:
         request.app.state.auto_apply_workers.submit(db_path(request), application_id, token)
     return run

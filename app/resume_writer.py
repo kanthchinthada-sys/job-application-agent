@@ -145,6 +145,12 @@ def build_prompt(profile: Profile, job: JobOut, plan, roles_in: list[tuple[int, 
         lines.append(f"{i}. {e['ask']} [{e['match']}; evidence: {', '.join(e['records']) or 'none'}]")
     if EMPHASIS.get(plan.family):
         lines.append(f"Role type: {EMPHASIS[plan.family]}")
+    available = {rid for _, items in roles_in for rid, _ in items}
+    recent = [rid for rid in plan.recent_ai_ids if rid in available]
+    if recent:
+        lines.append(f"Relevant AI work from the current employer: {', '.join(recent)}. "
+                     "Use a supported example from these records before any personal-project example in the "
+                     "summary. Keep the original scope, including tool usage, validation and ownership.")
     pool = list(dict.fromkeys(profile.skills + [x for g in profile.skill_groups for x in g.skills]
                               + [x for e in profile.experience for x in e.skills]))
     lines += ["", "SKILLS (the candidate's own lists): " + ", ".join(pool)]

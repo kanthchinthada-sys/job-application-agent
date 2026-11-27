@@ -3,8 +3,8 @@
 import re
 import sqlite3
 
-from app import core_skills, evidence, selection
-from app.vocabulary import find_terms, is_people_skill
+from app import core_skills, evidence, technical_requirements
+from app.vocabulary import find_terms
 
 _EXAMPLE = {
     "Test automation": "automate a regression scenario and verify the expected behavior",
@@ -33,29 +33,58 @@ _DRAFTS = {
                      "messaging], and [result]",
     "security testing": "Ran {label} on [system] with [tool or method], found [issue], and verified the fix",
     "performance testing": "Ran {label} on [system] with [tool] at [load], found [bottleneck], and [result]",
+    "model evaluation": "Performed {label} for [model or project] using [evaluation tool or dataset] to check "
+                        "[quality criteria] and identify [failure pattern]",
+    "model serving": "Implemented or validated {label} through [runtime or API], checking [latency, errors, or rollout]",
+    "model training": "Ran {label} for [model] using [framework and dataset] and measured [evaluation result]",
+    "production ml systems": "Operated or tested {label} in [production environment], using [tools] to check "
+                             "[deployment, reliability, or performance]",
+    "data pipelines": "Built or validated {label} from [source] to [destination], checking [transformation or data quality]",
+    "data engineering": "Applied {label} on [system] by [building or testing a data workflow] and verifying [actual result]",
+    "monitoring": "Used {label} in [system] to track [logs, metrics, or alerts] with [tool] and diagnose [issue]",
+    "alerting": "Validated {label} in [monitoring tool] by triggering [failure] and checking [threshold or notification]",
+    "datadog": "Used {label} to [monitor, troubleshoot, or configure what] in [system], verifying [signal or outcome]",
+    "gds": "Tested or integrated {label} in [travel system] with [provider], validating [booking or ticketing behavior]",
+    "ndc": "Tested or integrated {label} in [travel system] with [provider], validating [offer, order, or servicing behavior]",
 }
 
 
 # Which jobs have had their gaps worked out, and by which version of the review. A job saved before gap review
 # existed (or reviewed by an older version) is reviewed again the first time it is opened (ensure); it takes under
 # a second. Raise REVIEW_VERSION when the rules or the prompts change.
-REVIEW_VERSION = 2
+REVIEW_VERSION = 8
 _RUNS = """CREATE TABLE IF NOT EXISTS gap_review_runs (
     job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE, synced_at TEXT NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1)"""
+    version INTEGER NOT NULL DEFAULT 1, source_key TEXT NOT NULL DEFAULT '')"""
 
 
 def _runs_table(conn: sqlite3.Connection) -> None:
     conn.execute(_RUNS)
-    if "version" not in {row[1] for row in conn.execute("PRAGMA table_info(gap_review_runs)")}:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(gap_review_runs)")}
+    if "version" not in columns:
         conn.execute("ALTER TABLE gap_review_runs ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+    if "source_key" not in columns:
+        conn.execute("ALTER TABLE gap_review_runs ADD COLUMN source_key TEXT NOT NULL DEFAULT ''")
+
+
+def _latest_resume(conn, job_id: int):
+    return conn.execute("""SELECT d.id, d.content FROM documents d JOIN applications a ON a.id=d.application_id
+                           WHERE a.job_id=? AND d.kind='resume' ORDER BY d.version DESC LIMIT 1""", (job_id,)).fetchone()
+
+
+def _source_key(updated_at, resume) -> str:
+    return f"{updated_at}:{resume['id'] if resume else ''}"
 
 
 def ensure(conn: sqlite3.Connection, job) -> bool:
     """Work out this job's technical gaps if that was never done with the current review. True if it ran."""
     _runs_table(conn)
-    if conn.execute("SELECT 1 FROM gap_review_runs WHERE job_id=? AND version>=?",
-                    (job.id, REVIEW_VERSION)).fetchone():
+    profile = conn.execute("SELECT updated_at FROM profile WHERE id=1").fetchone()
+    if not profile:
+        return False
+    source = _source_key(profile["updated_at"], _latest_resume(conn, job.id))
+    if conn.execute("SELECT 1 FROM gap_review_runs WHERE job_id=? AND version>=? AND source_key=?",
+                    (job.id, REVIEW_VERSION, source)).fetchone():
         return False
     sync(conn, job)
     conn.commit()
@@ -63,7 +92,7 @@ def ensure(conn: sqlite3.Connection, job) -> bool:
 
 
 def _key(skill: str) -> str:
-    return evidence.normalize(skill.casefold())
+    return technical_requirements.key(skill)
 
 
 def _label(skill: str, job, requirement: str = "", heading: bool = True) -> str:
@@ -84,11 +113,11 @@ def _label(skill: str, job, requirement: str = "", heading: bool = True) -> str:
 def _example(skill: str, label: str) -> str:
     """A draft to adapt, only if it is true: concrete enough to show what kind of work would count."""
     category = core_skills.category_of(skill)
-    if category in _EXAMPLE:
+    if _key(skill) in _DRAFTS:
+        body = _DRAFTS[_key(skill)].format(label=label)
+    elif category in _EXAMPLE:
         body = (f"Used {label} to {_EXAMPLE[category]} for [system or project], checked [specific behavior or data], "
                 "and observed [actual result]")
-    elif _key(skill) in _DRAFTS:
-        body = _DRAFTS[_key(skill)].format(label=label)
     else:
         body = f"Used {label} to [build, test, or fix what] in [system or project], and [the result you saw]"
     return f"Draft only if true: {body}."
@@ -108,8 +137,7 @@ def _parts(name: str) -> list[str]:
 
 
 def _is_technical(skill: str) -> bool:
-    return bool(skill and not is_people_skill(skill) and core_skills.category_of(skill) != "Test leadership"
-                and (core_skills.is_listable(skill) or any(_key(term) == _key(skill) for _, _, term in find_terms(skill))))
+    return bool(technical_requirements.options(skill))
 
 
 def sync(conn: sqlite3.Connection, job) -> None:
@@ -119,9 +147,18 @@ def sync(conn: sqlite3.Connection, job) -> None:
         profile = repository.get_profile(conn)
     except NotFoundError:
         return
-    if not profile.experience and not profile.projects:
-        return
-    plan = selection.plan(profile, job)
+    latest = _latest_resume(conn, job.id)
+    uncovered = None
+    if latest:
+        from app import resume_match, tailoring
+        from pydantic import ValidationError
+        try:
+            resume = tailoring.TailoredResume.model_validate_json(latest["content"])
+        except ValidationError:
+            pass
+        else:
+            coverage = resume_match.analyze(resume, profile, job)
+            uncovered = {r.keyword for r in coverage.rows if r.needs_bank_evidence}
     records = {row.id: row for row in profile.experience_bank if row.status == "verified"}
     by_category = {}
     owners_with_text = [(r.owner, r.text) for r in records.values()]
@@ -131,51 +168,19 @@ def sync(conn: sqlite3.Connection, job) -> None:
         for _, _, term in find_terms(text):
             if category := core_skills.category_of(term):
                 by_category.setdefault(category, owner)
-    stated = [(str(i), s) for i, s in enumerate(
-        profile.skills + [x for group in profile.skill_groups for x in group.skills]
-        + [x for owner in [*profile.experience, *profile.projects] for x in [*owner.highlights, *owner.skills]]
-        + [r.text for r in records.values()]
-    )]
-    # what the match table already found in your records ("Kubernetes, distributed systems, and APIs": all three)
-    covered = {_key(part) for row in plan.rows for part in [*row.found_parts, *row.found_elsewhere]}
-
-    def have(name: str) -> bool:
-        return _key(name) in covered or bool((hit := evidence.find_part(_key(name), stated)) and not hit.related)
-
     pending = {}
-    alternatives = set()
-    # "TestNG/JUnit", "Power BI/Databricks": either one meets it, so none is a gap when you have one of them
-    either = [[_key(x) for x in _parts(listed)] for listed in [*job.required_skills, *job.preferred_skills]]
-    for row in plan.rows:
-        for group in re.findall(r"[\w.+#-]+(?:\s*/\s*[\w.+#-]+)+", row.requirement):
-            either.append([_key(x) for x in group.split("/") if x.strip()])
-    either = [group for group in either if len(group) > 1]
-
-    def add(name: str, requirement: str, owner) -> None:
-        for part in [x for x in _parts(name) if _is_technical(x)]:
-            key = _key(part)
-            if any(key in group and any(have(other) for other in group if other != key) for group in either):
+    if profile.experience or profile.projects:
+        for item in technical_requirements.for_job(job):
+            if uncovered is not None:
+                if item.label not in uncovered:
+                    continue
+            elif technical_requirements.profile_evidence(profile, item.options):
                 continue
-            if key not in alternatives and not selection._ANY_OF.search(part) and not have(part):
-                pending.setdefault(key, (requirement, owner))
-
-    for row in plan.rows:
-        if row.category != "technical":
-            continue
-        # A required alternative is already satisfied. Its unused tools are not gaps.
-        if row.strength in ("direct", "skills only") and selection._ANY_OF.search(row.requirement) and (
-            row.found_parts or row.found_elsewhere
-        ):
-            alternatives.update(_key(skill) for skill in row.not_found_parts)
-            continue
-        suggested_owner = next((records[rid].owner for rid in row.selected_ids if rid in records), None)
-        for name in row.not_found_parts:
-            add(name, row.requirement, suggested_owner)
-    for listed in [*job.required_skills, *job.preferred_skills]:
-        add(listed, listed, None)
-    for skill, (requirement, owner) in pending.items():
+            for skill in item.options:
+                pending.setdefault(skill, item.source)
+    for skill, requirement in pending.items():
         label = _label(skill, job, requirement)
-        owner = owner or by_category.get(core_skills.category_of(skill))
+        owner = by_category.get(core_skills.category_of(skill))
         example = _example(skill, _label(skill, job, requirement, heading=False))
         conn.execute(
             """INSERT INTO gap_suggestions (job_id, skill, requirement, owner_hint, example)
@@ -189,8 +194,11 @@ def sync(conn: sqlite3.Connection, job) -> None:
             conn.execute("DELETE FROM gap_suggestions WHERE id=?", (row["id"],))
     from datetime import datetime, timezone
     _runs_table(conn)
-    conn.execute("INSERT OR REPLACE INTO gap_review_runs (job_id, synced_at, version) VALUES (?, ?, ?)",
-                 (job.id, datetime.now(timezone.utc).isoformat(), REVIEW_VERSION))
+    raw_profile = conn.execute("SELECT updated_at FROM profile WHERE id=1").fetchone()
+    conn.execute("""INSERT OR REPLACE INTO gap_review_runs (job_id, synced_at, version, source_key)
+                    VALUES (?, ?, ?, ?)""",
+                 (job.id, datetime.now(timezone.utc).isoformat(), REVIEW_VERSION,
+                  _source_key(raw_profile["updated_at"], latest)))
 
 
 def list_suggestions(conn, job_id: int | None = None) -> list[dict]:
@@ -199,6 +207,12 @@ def list_suggestions(conn, job_id: int | None = None) -> list[dict]:
              JOIN jobs j ON j.id=s.job_id WHERE s.state='pending'"""
     where = " AND s.job_id=?" if job_id is not None else ""
     return [dict(row) for row in conn.execute(sql + where + " ORDER BY s.id DESC", () if job_id is None else (job_id,))]
+
+
+def approved_record_ids(conn, job_id: int) -> tuple[str, ...]:
+    rows = conn.execute("""SELECT record_id FROM gap_suggestions WHERE job_id=? AND state='approved'
+                           AND record_id IS NOT NULL ORDER BY id DESC""", (job_id,))
+    return tuple(dict.fromkeys(row["record_id"] for row in rows))
 
 
 def confirm(conn, suggestion_id: int, owner_name: str, text: str, in_transaction: bool = False) -> tuple[str, int]:
@@ -221,11 +235,11 @@ def confirm(conn, suggestion_id: int, owner_name: str, text: str, in_transaction
         if row["state"] != "pending":
             raise ConflictError("That technical gap has already been dismissed.")
         skill = row["skill"]
-        match = evidence.find_part(_key(skill), [("approved", text)])
-        if (not _is_technical(skill) or text == row["example"] or "[" in text or "]" in text
-                or re.search(r"\b(if you used|describe how|example if true|draft only if true)\b", text, re.IGNORECASE)
-                or match is None or match.related):
-            raise ConflictError(f"Describe your real work with {skill} before confirming this record.")
+        if (text == row["example"] or "[" in text or "]" in text
+                or re.search(r"\b(if you used|describe how|example if true|draft only if true)\b", text, re.IGNORECASE)):
+            raise ConflictError("Replace the example and fill in any placeholders with your own work.")
+        if not technical_requirements.supports(text, technical_requirements.options(skill)):
+            raise ConflictError(f"Mention {skill} or a recognized equivalent in the bullet and describe what you did with it.")
         profile = Profile.model_validate(repository.get_profile(conn).model_dump(exclude={"updated_at"}))
         owners = {x.company.casefold(): (x.company, "experience") for x in profile.experience}
         owners.update({x.name.casefold(): (x.name, "project") for x in profile.projects})
@@ -251,7 +265,6 @@ def confirm(conn, suggestion_id: int, owner_name: str, text: str, in_transaction
         aid = app_row["id"] if app_row else repository.create_application(
             conn, ApplicationCreate(job_id=row["job_id"]), commit=False).id
         conn.execute("UPDATE gap_suggestions SET state='approved', record_id=? WHERE id=?", (rid, suggestion_id))
-        conn.execute("DELETE FROM gap_suggestions WHERE skill=? COLLATE NOCASE AND state='pending'", (skill,))
         conn.execute("INSERT OR IGNORE INTO resume_refresh_requests (application_id) VALUES (?)", (aid,))
         in_transaction or conn.commit()
         return rid, aid
@@ -261,43 +274,60 @@ def confirm(conn, suggestion_id: int, owner_name: str, text: str, in_transaction
         raise
 
 
-def confirm_many(conn, items: list[tuple[int, str, str]]) -> tuple[list[str], list[int]]:
-    """Add several confirmed lines at once (all or none), so each job's resume is written once for all of them."""
-    from app.errors import ConflictError
+def confirm_many(conn, items: list[tuple[int, str, str]], allow_partial: bool = False, report_errors: bool = False
+                 ) -> tuple[list[str], list[int], dict[int, str]]:
+    """Save reviewed lines together and schedule one refresh per job. Interactive callers can keep valid lines."""
+    from app.errors import ConflictError, NotFoundError
+    collect_errors = allow_partial or report_errors
     conn.execute("BEGIN IMMEDIATE")
     try:
         records, apps = [], []
+        rejected = {}
         for suggestion_id, owner_name, text in items:
             skill = (conn.execute("SELECT skill FROM gap_suggestions WHERE id=?", (suggestion_id,)).fetchone()
                      or {"skill": "this skill"})["skill"]
+            if collect_errors:
+                conn.execute("SAVEPOINT review_line")
             try:
                 rid, aid = confirm(conn, suggestion_id, owner_name, text, in_transaction=True)
-            except ConflictError as exc:
-                raise ConflictError(f"{skill}: {exc}") from exc
+            except (ConflictError, NotFoundError) as exc:
+                if not collect_errors:
+                    if isinstance(exc, ConflictError):
+                        raise ConflictError(f"{skill}: {exc}") from exc
+                    raise
+                conn.execute("ROLLBACK TO review_line")
+                conn.execute("RELEASE review_line")
+                rejected[suggestion_id] = str(exc)
+                continue
+            if collect_errors:
+                conn.execute("RELEASE review_line")
             records.append(rid)
             if aid not in apps:
                 apps.append(aid)
+        if rejected and not allow_partial:
+            conn.rollback()
+            return [], [], rejected
         conn.commit()
-        return records, apps
+        return records, apps, rejected
     except Exception:
         conn.rollback()
         raise
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# AI drafts: instead of asking you to write the line, the AI writes one, set at the employer or project where the
-# skill most plausibly fits, built on what your records there already show. It only joins your bank (and reaches a
-# resume) after you confirm it is true.
+# Draft a new way of expressing documented work and ask the candidate to confirm it before saving it to the bank.
 
 _DRAFT_SYSTEM = """You help a job seeker add one line to their experience bank for a skill a job posting asks for.
-Write ONE resume bullet, set in the candidate's real work at the employer or project where this skill most plausibly
-fits, building on the systems, tools and domain that employer's records already show.
+Write ONE resume bullet describing work documented at a single listed employer or project. You may name a capability
+the records demonstrate even if they use different words. Preserve the scope of the work and the tools actually used.
 Rules:
 - Name the skill exactly as given, once.
 - One sentence, past tense, starts with a strong action verb, 16-28 words, no first person.
 - No numbers, percentages, team sizes, awards, certifications, or leadership claims (led, managed, mentored, owned).
-- Stay modest and concrete: the kind of work someone in that role there could really have done. The candidate will
-  confirm it is true before it is used.
+- Use the posting only to identify the skill. Do not infer use of a specific product or protocol from related work,
+  move work between employers and personal projects, or describe evaluation or testing as building or training models.
+- If none of the records support the requested skill, return empty owner and text, an empty based_on list, and a
+  short why. The candidate can then describe work from their own experience.
 - owner must be exactly one of the listed names; based_on lists the record IDs the bullet builds on.
 - why: one short sentence saying why this employer or project fits."""
 
@@ -324,9 +354,10 @@ def _words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9+#.]+", evidence.normalize(text.casefold())) if len(w) > 2}
 
 
-def _candidates(profile, job, row) -> list[dict]:
+def _candidates(profile, job, row, owner: str | None = None) -> list[dict]:
     """Your employers and projects, most relevant to this skill first, each with its closest records."""
     focus = _words(f"{row['skill']} {row['requirement']} {job.title}")
+    skill_words = _words(row["skill"])
     category = core_skills.category_of(row["skill"])
     owners: dict[str, dict] = {}
     for e in profile.experience:
@@ -342,10 +373,15 @@ def _candidates(profile, job, row) -> list[dict]:
             owners[r.owner]["lines"].append((r.id, r.text))
     ranked = []
     for o in owners.values():
+        if owner and o["name"].casefold() != owner.strip().casefold():
+            continue
         def score(line):
             words = _words(line)
             same_area = category and any(core_skills.category_of(t) == category for _, _, t in find_terms(line))
-            return len(words & focus) + (3 if same_area else 0)
+            terms = technical_requirements.options(row["skill"])
+            direct = technical_requirements.supports(line, terms)
+            related = technical_requirements.relates(line, terms)
+            return 20 * direct + 8 * related + 3 * len(words & skill_words) + len(words & focus) + (3 if same_area else 0)
         lines = sorted({t: (rid, t) for rid, t in o["lines"]}.values(), key=lambda x: -score(x[1]))
         o["lines"] = lines[:6]
         o["score"] = sum(score(t) for _, t in lines[:3]) + (5 if o["name"] == row["owner_hint"] else 0)
@@ -357,8 +393,7 @@ def _candidates(profile, job, row) -> list[dict]:
 def _draft_problems(text: str, skill: str, label: str) -> list[str]:
     from app import claims
     problems = []
-    hit = evidence.find_part(_key(skill), [("draft", text)])
-    if hit is None or hit.related:
+    if not technical_requirements.supports(text, technical_requirements.options(skill)):
         problems.append(f"It must name {label}.")
     if claims._NUMBER.search(text) or claims.NUMBER_WORDS.search(text):
         problems.append("It must not contain numbers or amounts.")
@@ -371,23 +406,46 @@ def _draft_problems(text: str, skill: str, label: str) -> list[str]:
     return problems
 
 
-def draft(conn: sqlite3.Connection, llm, suggestion_id: int, again: bool = False) -> dict:
+def draft(conn: sqlite3.Connection, llm, suggestion_id: int, again: bool = False, owner: str | None = None) -> dict:
     """The AI's line for this gap (written once and kept; again=True writes a new one)."""
     from app import metrics, repository
-    from app.errors import NotFoundError
-    from app.llm import LLMOutputError
+    from app.errors import ConflictError, NotFoundError
+    from app.llm import LLMOutputError, LLMUnavailableError
+    from app.vocabulary import TOOLS, canonical
     _columns(conn)
     row = conn.execute("SELECT * FROM gap_suggestions WHERE id=? AND state='pending'", (suggestion_id,)).fetchone()
     if not row:
         raise NotFoundError("That technical gap is no longer on your review list.")
-    if row["draft_text"] and not again:
+    if row["draft_text"] and not again and (not owner or owner.casefold() == (row["draft_owner"] or "").casefold()):
         return dict(row)
     job = repository.get_job(conn, row["job_id"])
     profile = repository.get_profile(conn)
-    candidates = _candidates(profile, job, row)
+    candidates = _candidates(profile, job, row, owner)
     if not candidates:
+        if owner:
+            raise ConflictError("Choose an employer or project from your saved profile.")
         raise LLMOutputError("Add an employer or project to your profile first.")
     label = _label(_key(row["skill"]), job, row["requirement"], heading=False)    # as the posting writes it
+    terms = technical_requirements.options(row["skill"])
+
+    def starter() -> dict:
+        selected = candidates[0]
+        known = next((t for _, t in selected["lines"] if len(t) <= 600 and technical_requirements.supports(t, terms)), None)
+        if known:
+            return {**dict(row), "draft_owner": selected["name"], "draft_text": known,
+                    "draft_note": "This bullet comes from your saved work at the selected employer or project."}
+        related = next((t for _, t in selected["lines"] if technical_requirements.relates(t, terms)), None)
+        note = "Fill in the bracketed details if you did this work at the selected employer or project."
+        if related:
+            note += f" Related work in your bank: {related}"
+        return {**dict(row), "draft_owner": selected["name"],
+                "draft_text": row["example"].removeprefix("Draft only if true: "), "draft_is_example": True,
+                "draft_note": note}
+
+    if owner and terms and all(canonical(term) in TOOLS for term in terms):
+        if not any(technical_requirements.supports(text, terms) for _, text in candidates[0]["lines"]):
+            return starter()
+
     blocks = []
     for o in candidates:
         lines = "\n".join(f"  - {f'[{rid}] ' if rid else ''}{text}" for rid, text in o["lines"])
@@ -398,15 +456,29 @@ def draft(conn: sqlite3.Connection, llm, suggestion_id: int, again: bool = False
     names = {o["name"].casefold(): o["name"] for o in candidates}
     note = ""
     for _ in range(2):
-        answer = metrics.call(llm, "technical gap draft", _DRAFT_SYSTEM, prompt + note, _DRAFT_SCHEMA)
+        try:
+            answer = metrics.call(llm, "technical gap draft", _DRAFT_SYSTEM, prompt + note, _DRAFT_SCHEMA)
+        except (LLMOutputError, LLMUnavailableError):
+            if owner:
+                return starter()
+            raise
         text = " ".join(str(answer.get("text") or "").split()).strip()
-        owner = names.get(str(answer.get("owner") or "").casefold().strip(), candidates[0]["name"])
+        drafted_owner = names.get(str(answer.get("owner") or "").casefold().strip())
+        if not text and not drafted_owner:
+            if owner:
+                return starter()
+            raise LLMOutputError(f"Your saved experience does not support a bullet for {label} yet. If you used it, "
+                                 "describe your work below.")
         problems = _draft_problems(text, row["skill"], label)
+        if not drafted_owner:
+            problems.append("Choose the employer or project whose records support the bullet.")
         if not problems:
             why = " ".join(str(answer.get("why") or "").split())[:300]
             conn.execute("UPDATE gap_suggestions SET draft_owner=?, draft_text=?, draft_note=? WHERE id=?",
-                         (owner, text, why or None, suggestion_id))
+                         (drafted_owner, text, why or None, suggestion_id))
             conn.commit()
             return dict(conn.execute("SELECT * FROM gap_suggestions WHERE id=?", (suggestion_id,)).fetchone())
         note = f"\n\nYOUR LAST ANSWER: {text}\nFIX: {' '.join(problems)}"
+    if owner:
+        return starter()
     raise LLMOutputError(f"The AI could not write a usable line for {label}. Try again, or write it yourself.")

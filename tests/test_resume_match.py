@@ -4,9 +4,10 @@ from contextlib import closing
 from app import database, repository, resume_pdf_review
 
 
-def _draft(client, db_path, profile, make_job):
-    job = make_job(title="Test Engineer", required_skills=["Kubernetes integration testing", "Cypress", "Go", "Communication"],
-                   preferred_skills=["PostgreSQL", "Postgres", "Kubernetes integration testing", "AWS"])
+def _draft(client, db_path, profile, make_job, job=None):
+    if job is None:
+        job = make_job(title="Test Engineer", required_skills=["Kubernetes integration testing", "Cypress", "Go", "Communication"],
+                       preferred_skills=["PostgreSQL", "Postgres", "Kubernetes integration testing", "AWS"])
     application_id = client.post("/applications", json={"job_id": job["id"]}).json()["id"]
     role = profile["experience"][0]
     content = {"name": profile["full_name"], "headline": None, "contact": {},
@@ -81,3 +82,50 @@ def test_pdf_check_reports_keyword_and_reading_order_loss(client, db_path, profi
     assert result.required_found == ["Kubernetes integration testing", "Go"]
     assert result.required_missing == ["Cypress"]
     assert result.issues == ["Section headings came out in a different reading order."]
+
+
+def test_uncovered_40_percent_uses_posting_skills_and_queues_the_same_gap(client, db_path, profile_data, make_job):
+    client.put("/profile", json=profile_data).raise_for_status()
+    job = make_job(title="SDET", description="About us:\nOur company uses AWS.\n\n"
+                   "Required Qualifications:\n- Kubernetes\n- Cypress\n- Excellent communication.\n\n"
+                   "Nice to have:\n- PostgreSQL\n\nBenefits:\nAccess to Docker training.",
+                   required_skills=["Working with Customer Success stakeholders", "AWS"], preferred_skills=[])
+    doc = _draft(client, db_path, profile_data, make_job, job)
+    report = client.get(f"/documents/{doc.id}/technical-coverage").raise_for_status().json()
+    assert report["score"] == 60
+    assert {r["keyword"] for r in report["rows"]} == {"Kubernetes", "Cypress", "PostgreSQL"}
+    missing = [r for r in report["rows"] if r["placement"] not in {"bullet", "skills", "mention"}]
+    assert [r["keyword"] for r in missing] == ["Cypress"]
+    gaps = client.get("/experience-gaps", params={"job_id": job["id"]}).raise_for_status().json()
+    assert [(x["skill"], x["requirement"]) for x in gaps] == [("Cypress", "Cypress")]
+    job_match = client.get(f"/jobs/{job['id']}/requirements").raise_for_status().json()
+    assert {r["requirement"] for r in job_match["rows"]} == {r["keyword"] for r in report["rows"]}
+    client.put("/profile", json={**profile_data, "skills": [*profile_data["skills"], "Cypress"]}).raise_for_status()
+    profile_only = client.get(f"/documents/{doc.id}/technical-coverage").raise_for_status().json()
+    cypress = next(r for r in profile_only["rows"] if r["keyword"] == "Cypress")
+    assert cypress["placement"] == "profile" and cypress["needs_bank_evidence"] and profile_only["score"] == 60
+    assert [x["skill"] for x in client.get("/experience-gaps", params={"job_id": job["id"]}).json()] == ["Cypress"]
+
+
+def test_tools_listed_as_examples_are_one_requirement(client, profile_data, make_job):
+    client.put("/profile", json={**profile_data, "skills": ["Playwright"]}).raise_for_status()
+    job = make_job(title="SDET", description="Required skills:\n- Experience with browser tools such as Cypress, "
+                   "Playwright and Selenium.\n- Kotlin.", required_skills=["Cypress", "Playwright", "Selenium"])
+    rows = client.get(f"/jobs/{job['id']}/requirements").raise_for_status().json()["rows"]
+    assert [(row["requirement"], row["missing"]) for row in rows] == [
+        ("Cypress or Playwright or Selenium", []), ("Kotlin", ["Kotlin"]),
+    ]
+    pending = client.get("/experience-gaps", params={"job_id": job["id"]}).raise_for_status().json()
+    assert [row["skill"] for row in pending] == ["Kotlin"]
+
+
+def test_activity_can_show_alerting_without_claiming_a_different_tool():
+    from app import technical_requirements as requirements
+
+    work = "Configured Prometheus alert rules for sustained API error rates and notified the owning team."
+    assert requirements.supports(work, requirements.options("Alerting"))
+    assert requirements.relates(work, requirements.options("Datadog"))
+    assert not requirements.supports(work, requirements.options("Datadog"))
+    assert not requirements.supports("Built Grafana dashboards for CPU usage.", requirements.options("Alerting"))
+    assert not requirements.supports("Never configured Prometheus alert rules.", requirements.options("Alerting"))
+    assert requirements.supports("Set up Datadog monitors for API latency.", requirements.options("Datadog"))

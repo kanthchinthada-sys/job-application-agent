@@ -39,8 +39,19 @@ _LOCATION_HINT = re.compile(r"\b(remote|hybrid|on-?site|in office)\b|,\s*[A-Z]{2
                             re.IGNORECASE)
 _TITLE_WORDS = re.compile(r"\b(engineer|developer|manager|lead|analyst|architect|scientist|designer|specialist|"
                           r"consultant|director|administrator|tester|sdet|qa|officer|coordinator|associate|intern|"
-                          r"head|principal|staff|technician|representative|writer|researcher|product|owner)\b",
+                          r"head|principal|staff|technician|representative|writer|researcher|product|owner|"
+                          r"scrum master|recruiter|strategist|auditor|accountant|advisor|operator)s?\b",
                           re.IGNORECASE)
+_ROLE_IN_PROSE = re.compile(
+    r"\b(?:[Aa]s (?:an?|the)|[Tt]his role is (?:an?|the)|[Ww]e(?:['’]re| are) (?:looking for|hiring|seeking)(?: an?)?)"
+    r"\s+([A-Z][\w/&+.-]*(?:[ \t]+(?:[A-Z][\w/&+.-]*|and|of|for)){0,9}"
+    r"(?:,\s+(?![Yy]ou\b)[A-Z][\w/&+.-]*(?:[ \t]+(?:[A-Z][\w/&+.-]*|and|of|for)){0,7})?)"
+    r"(?=\s*(?:[,.:]|\s+(?:you\b|to\b|who\b|with\b|at\b|will\b|that\b)))")
+
+
+def is_title_placeholder(title: str) -> bool:
+    return bool(re.match(r"^(?:about\b|who (?:are|we)\b|why (?:this |join\b)|untitled job$|job description$)",
+                         title.strip(), re.IGNORECASE) or title.rstrip().endswith("?"))
 _HOSTS_WITH_COMPANY_IN_PATH = ("greenhouse.io", "lever.co", "ashbyhq.com", "workable.com", "smartrecruiters.com",
                                "recruitee.com", "bamboohr.com", "breezy.hr", "teamtailor.com")
 
@@ -177,25 +188,24 @@ def rule_fields_detailed(description: str, url: str | None = None):
     head = lines[:12]
     raw_head = [x.strip() for x in description.splitlines()[:40] if x.strip()]
     if not found["title"]:
-        # "As a Forward Deployed Engineer, you'll ..." names the role in many postings
-        m = re.search(r"\b(?:As|We(?:'re| are) (?:looking for|hiring|seeking))\s+an?\s+((?:[A-Z][\w/&+.-]*\s*){1,7}?)"
-                      r"(?:,|\s+(?:you|to|who|on|in|at|for|will)\b)", " ".join(lines[:30]))
-        if m and _TITLE_WORDS.search(m.group(1)):
-            put("title", m.group(1), "sentence")
-    if not found["title"]:
         bullets = {" ".join(x.split()).strip(" •*-–·#") for x in raw_head if re.match(r"^[•*\-–·]\s", x)}
         for x in head:
-            if (_BOILER.match(x) or len(x.split()) > 14 or x.endswith((".", ":")) or _LABEL.match(x)
+            if (_BOILER.match(x) or is_title_placeholder(x) or len(x.split()) > 14 or x.endswith((".", ":")) or _LABEL.match(x)
                     or x in bullets or posting_kind(x)):
                 continue
             # "Senior SDET - Contoso" / "Senior SDET at Contoso" / "Senior SDET | Contoso | Remote"
             parts = re.split(r"\s+[|–—]\s+|\s+-\s+|\s+at\s+|\s+@\s+", x, maxsplit=2)
-            if _TITLE_WORDS.search(parts[0]) or x is head[0]:
-                put("title", parts[0], "title line" if _TITLE_WORDS.search(parts[0]) else "first line")
+            if _TITLE_WORDS.search(parts[0]) and not re.search(r"\b(?:you|we|is|are|will)\b", parts[0], re.I):
+                put("title", parts[0], "title line")
                 if len(parts) > 1 and not _LOCATION_HINT.search(parts[1]):
                     put("company", parts[1], "title line")
                 if len(parts) > 2:
                     put("location", parts[2], "title line")
+                break
+    if not found["title"]:
+        for match in _ROLE_IN_PROSE.finditer(" ".join(lines[:40])):
+            if _TITLE_WORDS.search(match[1]):
+                put("title", match[1], "sentence")
                 break
     if not found["company"]:
         for x in lines:
@@ -251,7 +261,8 @@ MIN_SKILLS = 3          # fewer required skills than this from the rules: the mo
 def read_with_rules(description: str, url: str | None, known: dict[str, str] | None = None) -> Intake:
     """Everything the rules find, at once (no model). ``known``: fields already known for sure (from a job board,
     the page's structured data, or typed by you); they are kept and never flagged."""
-    known = {k: v for k, v in (known or {}).items() if v and v[0]}     # field -> (value, where it came from)
+    known = {k: v for k, v in (known or {}).items() if v and v[0]
+             and (k != "title" or v[1] == "you" or not is_title_placeholder(v[0]))}
     fields, notes, how = rule_fields_detailed(description, url)
     found_by = {k: f"rules ({how[k]})" for k, v in fields.items() if v}
     for key, (value, source) in ((k, v) for k, v in known.items()):
@@ -343,6 +354,8 @@ def apply_model_answer(info: Intake, ai: "_AIAnswer", description: str, url: str
         if key not in only:
             continue
         value = " ".join(getattr(ai, key).split())
+        if key == "title" and is_title_placeholder(value):
+            continue
         if key == "company" and is_generic_company(value):
             continue                         # "Our client", "Confidential": the posting doesn't name it
         if value and _backed(value, source) and len(value) < 120 and value != placeholder.get(key):

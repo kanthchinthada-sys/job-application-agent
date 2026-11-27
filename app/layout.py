@@ -7,6 +7,9 @@ fits here fits on paper.
 
 import math
 import re
+from io import BytesIO
+
+from app.errors import ConflictError
 
 CHARS_PER_LINE = 112        # full-width paragraph (summary, skills)
 CHARS_PER_BULLET_LINE = 108  # bullets are indented
@@ -55,6 +58,9 @@ def estimate_pages(resume) -> float:
 # ---------------------------------------------------------------------------
 
 MAX_PAGES = 2
+MIN_SUMMARY_LINES = 5
+MIN_SKILL_HEADINGS = 8
+MAX_PROJECT_POINTS = 5
 SAFETY_LINES = 3                       # page breaks never fall exactly at the end of a page
 # Default minimum bullets per role, most recent first. Each user sets their own in profile.resume_settings.
 MIN_BULLETS = [6, 4, 3, 3, 2]
@@ -247,18 +253,110 @@ def fit_measured(resume, render_html, scores=None, ai_or_fde=False, max_pages: i
     report.update({"measured": True, "printed_pages": pages, "fits": pages == max_pages,
                    "measurements": len(tries) + 1})
     return report
-    real_lines, _ = first
-    factor = real_lines / max(1.0, estimate_lines(resume))   # how this content prints vs the estimate
-    capacity = max_pages * PRINTED_LINES_PER_PAGE - PAGE_BREAK_WASTE
-    report = {}
-    for tighten in (0, 3, 6, 10):
-        attempt = copy.deepcopy(original)
-        budget_lines = (capacity - tighten) / factor
-        report = fit(attempt, scores, ai_or_fde, max_pages, budget_override=budget_lines)
-        result = measure(render_html(attempt))
-        pages = result[1] if result else None
-        if pages is not None and pages <= max_pages:
-            break
-    resume.__dict__.update(attempt.__dict__)
-    report.update({"measured": True, "printed_pages": pages, "fits": pages is not None and pages <= max_pages})
-    return report
+
+
+def strict_role_minimums(profile) -> dict[tuple[str, str], int]:
+    floors = profile.resume_settings.min_bullets or MIN_BULLETS
+    return {(role.company, role.start_date): floors[min(i, len(floors) - 1)] for i, role in enumerate(profile.experience)}
+
+
+def strict_content_issues(resume, profile) -> list[str]:
+    from app.resume_render import project_points
+
+    issues = []
+    headings = {g["name"].strip().casefold() for g in resume.skill_groups
+                if g["name"].strip() and any(skill.strip() for skill in g["skills"])}
+    if len(headings) < MIN_SKILL_HEADINGS:
+        issues.append(f"Core Skills has {len(headings)} headings and needs at least {MIN_SKILL_HEADINGS}.")
+    roles = {(role.company, role.start_date): role.bullets for role in resume.experience}
+    for key, minimum in strict_role_minimums(profile).items():
+        count = len({" ".join(b.text.casefold().split()) for b in roles.get(key, []) if b.text.strip()})
+        if count < minimum:
+            issues.append(f"{key[0]} has {count} bullets and needs at least {minimum}.")
+    points = sum(len(project_points(p)) for p in resume.projects)
+    if points > MAX_PROJECT_POINTS:
+        issues.append(f"Projects has {points} bullets and allows at most {MAX_PROJECT_POINTS}.")
+    return issues
+
+
+def render_pdf(html: str, inspect_summary: bool = False) -> bytes | tuple[bytes, int]:
+    """Print the same Chromium page for layout validation, downloads and attachments."""
+    from app import browser as chromium
+
+    def make(browser):
+        page = chromium.print_page(browser, html)
+        try:
+            page.evaluate("() => window.smartJustify?.()")
+            lines = page.evaluate("""() => {
+                const summary = document.querySelector('.resume-summary');
+                if (!summary?.textContent.trim()) return 0;
+                const range = document.createRange();
+                range.selectNodeContents(summary);
+                return new Set([...range.getClientRects()].filter(r => r.width > 0).map(r => Math.round(r.top))).size;
+            }""") if inspect_summary else 0
+            pdf = page.pdf(format="Letter", prefer_css_page_size=True, print_background=True)
+            return (pdf, lines) if inspect_summary else pdf
+        finally:
+            page.close()
+
+    return chromium.run(make, timeout=60)
+
+
+def _pdf_pages(data: bytes) -> int:
+    from pypdf import PdfReader
+
+    return len(PdfReader(BytesIO(data)).pages)
+
+
+def _strict_error(issues: list[str]) -> ConflictError:
+    return ConflictError("Résumé does not meet strict PDF requirements. " + " ".join(issues))
+
+
+def strict_pdf(resume, profile, render_html) -> bytes:
+    if issues := strict_content_issues(resume, profile):
+        raise _strict_error(issues)
+    data, lines = render_pdf(render_html(resume), inspect_summary=True)
+    pages = _pdf_pages(data)
+    issues = []
+    if lines < MIN_SUMMARY_LINES:
+        issues.append(f"Professional Summary prints on {lines} lines and needs at least {MIN_SUMMARY_LINES}.")
+    if pages != MAX_PAGES:
+        issues.append(f"The résumé prints on {pages} pages and needs exactly {MAX_PAGES}.")
+    if issues:
+        raise _strict_error(issues)
+    return data
+
+
+def fit_strict(resume, profile, render_html, scores=None, protect=None, allow_trim=True) -> dict:
+    """Adjust layout without permitting any role to go below its minimum."""
+    if issues := strict_content_issues(resume, profile):
+        raise _strict_error(issues)
+    floors = strict_role_minimums(profile)
+    breaks = sorted(range(len(resume.experience)), key=lambda i: abs(i - len(resume.experience) / 2))
+    attempts = 0
+    pages = 0
+    for trimmed in ((False, True) if allow_trim else (False,)):
+        candidate = resume.model_copy(deep=True)
+        report = {"removed_bullets": [], "skills_left_out": []}
+        if trimmed:
+            report = fit(candidate, scores, budget_override=0,
+                         min_bullets=[floors.get((r.company, r.start_date), 0) for r in candidate.experience],
+                         protect=protect)
+        for style in ("standard", "compact"):
+            candidate.print_layout = style
+            for before in [None, *breaks]:
+                candidate.page_break_before_role = before
+                data, lines = render_pdf(render_html(candidate), inspect_summary=True)
+                attempts += 1
+                pages = _pdf_pages(data)
+                if lines < MIN_SUMMARY_LINES:
+                    raise _strict_error([f"Professional Summary prints on {lines} lines and needs at least {MIN_SUMMARY_LINES}."])
+                if pages == MAX_PAGES:
+                    if issues := strict_content_issues(candidate, profile):
+                        raise _strict_error(issues)
+                    resume.__dict__.update(candidate.__dict__)
+                    return {**report, "estimated_pages": MAX_PAGES, "max_pages": MAX_PAGES, "fits": True,
+                            "measured": True, "printed_pages": pages, "summary_lines": lines, "measurements": attempts}
+                if pages > MAX_PAGES and before is None:
+                    break
+    raise _strict_error([f"The résumé prints on {pages} pages and needs exactly {MAX_PAGES} with all section minimums."])

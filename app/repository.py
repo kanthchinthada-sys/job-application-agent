@@ -70,6 +70,7 @@ def _row_to_job(row: sqlite3.Row) -> JobOut:
         description=row["description"],
         required_skills=json.loads(row["required_skills"]),
         preferred_skills=json.loads(row["preferred_skills"]),
+        technical_skills_override=bool(row["technical_skills_override"]) if "technical_skills_override" in row.keys() else False,
         created_at=row["created_at"],
     )
 
@@ -129,7 +130,7 @@ def get_job(conn: sqlite3.Connection, job_id: int) -> JobOut:
 def update_job(conn: sqlite3.Connection, job_id: int, changes: dict) -> JobOut:
     """Change title, company, location or skills of a saved job (fixing what was read from the posting)."""
     get_job(conn, job_id)
-    allowed = {"title", "company", "location", "description", "required_skills", "preferred_skills"}
+    allowed = {"title", "company", "location", "description", "required_skills", "preferred_skills", "technical_skills_override"}
     sets, values = [], []
     for key, value in changes.items():
         if key not in allowed:

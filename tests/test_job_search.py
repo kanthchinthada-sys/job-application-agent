@@ -207,6 +207,8 @@ def test_an_excerpt_is_replaced_by_the_full_posting_from_the_company_board(db_pa
                        "location": {"name": "Toronto, ON"}, "company_name": "Northwind (fictional)"}]}
     job77 = {**board["jobs"][0], "content": "&lt;p&gt;FICTIONAL. Requirements: Python, Playwright, Kubernetes. "
              + "More fictional detail. " * 40 + "&lt;/p&gt;"}
+    board["jobs"].insert(0, dict(board["jobs"][0], id=76, location={"name": "London, United Kingdom"},
+                                absolute_url="https://boards.greenhouse.io/northwind/jobs/76"))
     base = make_fetch([])
 
     def fetch(url):

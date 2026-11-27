@@ -108,7 +108,7 @@ export class ResumeView {
 
   /** Printed length against the page target: "Fits on 2 pages", "1 page (short)" or "Too long (3 pages)". */
   protected readonly fit = computed(() => {
-    const lay: any = (this.reviewDoc().review ?? {}).layout;
+    const lay: any = this.doc().review?.layout ?? this.reviewDoc().review?.layout;
     if (!lay) return null;
     const max = lay.max_pages ?? 2;
     const pages = lay.printed_pages ?? Math.ceil(lay.estimated_pages ?? max);
@@ -123,9 +123,6 @@ export class ResumeView {
     const out: string[] = [...(r.warnings ?? [])];
     const f = this.fit();
     if (f && f.pages > f.max) out.push(`It is longer than ${f.max} pages.`);
-    const gaps = (r.ats?.gaps ?? []).map((g: any) => g.keyword);
-    if (gaps.length) out.push(`Keywords in the job description that your profile doesn't show: ${gaps.join(', ')}.`);
-    for (const g of r.scorecard?.gaps ?? []) out.push(`Required, and nothing in your profile shows it: ${g}`);
     const rejected = this.bullets(b => !!b.rejected_reason).length;
     if (rejected) out.push(`${rejected} AI rewording${rejected > 1 ? 's were' : ' was'} rejected; your original wording was kept.`);
     for (const e of r.tailoring_report?.eligibility ?? []) out.push(`Check yourself: ${e}`);

@@ -1,9 +1,14 @@
 """The page estimate against the real thing: Chrome prints the tailored resume, and it must fit 2 pages."""
 
-import pytest
+from contextlib import closing
+from io import BytesIO
 
-from app import layout
+import pytest
+from pypdf import PdfReader
+
+from app import database, layout, repository
 from app.resume_render import render
+from app.schemas import Profile
 from tests.test_layout import big_resume
 
 pytestmark = pytest.mark.e2e
@@ -50,3 +55,36 @@ def test_measured_fit_prints_on_two_pages_and_keeps_minimums(shape, monkeypatch)
     assert report["measured"] and report["fits"] and report["printed_pages"] <= 2
     counts = [len(role.bullets) for role in r.experience]
     assert all(c >= m for c, m in zip(counts, layout.MIN_BULLETS))
+
+
+def test_strict_pdf_keeps_role_minimums_and_blocks_an_old_short_version(client, db_path):
+    resume = big_resume(roles=(14, 10, 9, 6), project=5, groups=8)
+    resume.summary = ("Built fictional regression tooling to verify service behavior after each release. "
+                      "Investigated unexpected API responses using logs, test outputs and deployment evidence. "
+                      "Developed repeatable integration checks for distributed workflows and diagnosed regressions "
+                      "with developers. Automated evidence collection to make failed checks easier to reproduce and "
+                      "worked with delivery teams to prioritize high-risk scenarios. Maintained test data and "
+                      "validated environment readiness before release testing.")
+    profile = Profile.model_validate({
+        "full_name": resume.name,
+        "resume_settings": {"strict_layout": True, "min_bullets": [8, 6, 5, 4]},
+        "experience": [r.model_dump(include={"company", "title", "start_date", "end_date"}) for r in resume.experience],
+    })
+    client.put("/profile", json=profile.model_dump(mode="json")).raise_for_status()
+    job = client.post("/jobs", json={"title": "Engineer (fictional)", "company": "Example (fictional)",
+                                    "description": "Fictional role for integration testing.",
+                                    "required_skills": ["Integration testing"]}).raise_for_status().json()
+    application = client.post("/applications", json={"job_id": job["id"]}).raise_for_status().json()
+    short = resume.model_copy(deep=True)
+    short.experience[0].bullets = short.experience[0].bullets[:3]
+    report = layout.fit_strict(resume, profile, lambda r: render(r, job["title"], job["company"]))
+    assert report["summary_lines"] >= 5 and report["printed_pages"] == 2
+    assert all(len(role.bullets) >= floor for role, floor in zip(resume.experience, [8, 6, 5, 4], strict=True))
+    assert len(resume.skill_groups) >= 8 and len(resume.projects[0]["highlights"]) <= 5
+    with closing(database.connect(db_path)) as conn:
+        old = repository.add_document(conn, application["id"], "resume", "", short.model_dump_json(), "agent", None, {})
+        good = repository.add_document(conn, application["id"], "resume", "", resume.model_dump_json(), "agent", None, {})
+    invalid = client.get(f"/documents/{old.id}/pdf")
+    assert invalid.status_code == 409 and "has 3 bullets and needs at least 8" in invalid.json()["detail"]
+    exported = client.get(f"/documents/{good.id}/pdf").raise_for_status()
+    assert len(PdfReader(BytesIO(exported.content)).pages) == 2

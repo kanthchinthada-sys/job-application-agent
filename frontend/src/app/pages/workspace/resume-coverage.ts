@@ -1,4 +1,4 @@
-import { Component, effect, inject, input, output, signal } from '@angular/core';
+import { Component, computed, effect, inject, input, output, signal } from '@angular/core';
 import { RouterLink } from '@angular/router';
 
 import { Api, ApiError } from '../../api';
@@ -21,12 +21,30 @@ import { Doc, EvidencePreview, ResumePdfCheck, TechnicalCoverage, TechnicalRequi
           <p class="small muted">Add technical requirements from the full job posting to calculate coverage.</p>
         } @else {
           <p class="small muted">Required terms count twice. Employers set their own screening criteria.</p>
+          @if (missing().length) {
+            <div class="requirement" data-testid="missing-technical-skills">
+              <b>Missing from this résumé · {{ missingPercent() }}% of the weighted score</b>
+              @if (backed().length) {
+                <p class="small"><b>Evidence already in your profile</b> · {{ skillList(backed()) }}</p>
+              }
+              @if (needsEvidence().length) {
+                <p class="small"><b>Skills to verify</b> · {{ skillList(needsEvidence()) }}</p>
+              }
+              @if (hasBankSuggestions()) {
+                <a class="small" [routerLink]="[]" [queryParams]="{tab: 'match', doc: null}"
+                   queryParamsHandling="merge">Review Experience Bank suggestions</a>
+              }
+            </div>
+          }
           <details>
             <summary>Review technical requirements</summary>
-            @for (row of match.rows; track row.keyword) {
+            @for (row of ordered(); track row.keyword) {
               <div class="requirement">
                 <b>{{ row.keyword }}</b> <span class="small muted">· {{ row.required ? 'Required' : 'Preferred' }}</span>
                 <div class="small">{{ labels[row.placement] }}{{ row.owner ? ' · ' + row.owner : '' }}</div>
+                @if (row.source && row.source !== row.keyword) {
+                  <div class="small muted">{{ row.source }}</div>
+                }
                 @if (row.evidence && row.placement !== 'verified') { <div class="small muted">{{ row.evidence }}</div> }
                 @if (row.options[0]; as option) {
                   <button type="button" class="secondary tight" [disabled]="saving()"
@@ -39,7 +57,7 @@ import { Doc, EvidencePreview, ResumePdfCheck, TechnicalCoverage, TechnicalRequi
                       }
                     </details>
                   }
-                } @else if (row.placement === 'gap' || row.placement === 'transferable') {
+                } @else if (row.needs_bank_evidence) {
                   <a class="small" [routerLink]="[]" [queryParams]="{tab: 'match', doc: null}"
                      queryParamsHandling="merge">Review job and skill match</a>
                 }
@@ -104,6 +122,14 @@ export class ResumeCoverage {
   protected readonly loading = signal(false);
   protected readonly saving = signal(false);
   protected readonly checkingPdf = signal(false);
+  protected readonly missing = computed(() => (this.coverage()?.rows ?? [])
+    .filter(row => !['bullet', 'skills', 'mention'].includes(row.placement)));
+  protected readonly backed = computed(() => this.missing().filter(row => ['verified', 'profile'].includes(row.placement)));
+  protected readonly needsEvidence = computed(() => this.missing().filter(row => ['transferable', 'gap'].includes(row.placement)));
+  protected readonly hasBankSuggestions = computed(() => this.missing().some(row => row.needs_bank_evidence));
+  protected readonly missingPercent = computed(() => Number((100 - (this.coverage()?.score ?? 0)).toFixed(1)));
+  protected readonly ordered = computed(() => [...this.missing(), ...(this.coverage()?.rows ?? [])
+    .filter(row => ['bullet', 'skills', 'mention'].includes(row.placement))]);
   protected readonly labels: Record<TechnicalRequirement['placement'], string> = {
     bullet: 'In a work or project bullet', skills: 'Listed as a skill', mention: 'Mentioned elsewhere on the résumé',
     verified: 'Verified example available', profile: 'In your profile', transferable: 'Related experience', gap: 'No supporting evidence found',
@@ -115,6 +141,10 @@ export class ResumeCoverage {
 
   protected displayScore(score?: number | null): string {
     return score == null ? '—' : `${score}%`;
+  }
+
+  protected skillList(rows: TechnicalRequirement[]): string {
+    return rows.map(row => row.keyword).join(', ');
   }
 
   private async load(id: number) {

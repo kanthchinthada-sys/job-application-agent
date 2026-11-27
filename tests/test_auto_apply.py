@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 from contextlib import closing
@@ -146,10 +147,79 @@ def test_existing_aggregator_application_can_use_a_direct_employer_link(auto_cli
     route, setup = _setup(client, app)
     assert not setup["supported"] and setup["can_set_portal"]
     assert client.put(route + "/portal", json={"url": original}).status_code == 409
+    manual = "https://ca.linkedin.com/jobs/view/fictional-12345"
+    setup = client.put(route + "/portal", json={"url": manual + "?tracking=discard"}).raise_for_status().json()
+    assert not setup["supported"] and setup["manual_url"] == manual
+    assert client.get(route).raise_for_status().json()["manual_url"] == manual
     setup = client.put(route + "/portal", json={"url": "https://jobs.ashbyhq.com/fictional/42"}).raise_for_status().json()
     assert setup["supported"] and setup["provider"] == "ashby"
     assert setup["url"].endswith("/fictional/42/application")
     assert client.get(f"/applications/{app}").json()["source_url"] == original
+
+
+def test_greenhouse_screening_uses_selected_resume_and_real_options(auto_client, job_data, profile_data):
+    client, browser = auto_client
+    profile_data["preferences"]["work_authorization"] = "Canadian Permanent Resident"
+    client.put("/profile", json=profile_data).raise_for_status()
+    app_id, initial = _application(client, job_data)
+    content = json.loads(initial["content"])
+    content["name"] = "Jordan Applicant (fictional)"
+    content["contact"]["links"] = ["https://www.linkedin.com/in/fictional-applicant/"]
+    selected = client.post(f"/documents/{initial['id']}/versions", json={"content": json.dumps(content)}).raise_for_status().json()
+    route, setup = _setup(client, app_id)
+
+    def q(label, field, kind="input_text", options=(), required=True):
+        return {"label": label, "required": required,
+                "fields": [{"name": field, "type": kind, "values": [{"label": x} for x in options]}]}
+
+    metadata = {"location": {"name": "Toronto, Ontario, Canada"}, "questions": [
+        q("What is your legal name?", "question_1"), q("Please share your LinkedIn profile URL", "question_2", required=False),
+        q("Are you legally authorized to work in Canada?", "question_3", "multi_value_single_select", ("Yes", "No")),
+        q("Will you require sponsorship to work in Canada?", "question_4", "multi_value_single_select", ("Yes", "No")),
+        q("What is your current Canadian government security clearance status?", "question_5[]",
+          "multi_value_multi_select", ("Secret", "No clearance / Ineligible")),
+        q("Why are you interested in this role?", "question_6", required=False),
+        q("On a scale of 1 to 10, rate your fit and explain why.", "question_7", required=False),
+        q("Are you authorized to work in the United States?", "question_8", "multi_value_single_select", ("Yes", "No")),
+        q("Are you authorized to work in Canada or Mexico?", "question_9", "multi_value_single_select", ("Yes", "No")),
+        q("Are you currently legally authorized to work in the country where this position is located?",
+          "question_10", "multi_value_single_select", ("Yes", "No")),
+        q("Do you have any outside business activities?", "question_11"),
+        q("If yes, please describe:", "question_12", required=False),
+        q("Cover Letter", "cover_letter", "input_file", required=False),
+    ]}
+    client.app.state.fetch = lambda url: metadata
+    assert setup["contact"]["full_name"] == content["name"]
+    original_setup = client.get(route, params={"resume_id": initial["id"]}).raise_for_status().json()
+    assert original_setup["preview"] != setup["preview"]
+    prepared = client.get(route + "/screening", params={"resume_id": selected["id"]}).raise_for_status().json()
+    name, linkedin, authorized, sponsor, clearance, why, fit, us, mixed, generic, outside, followup = prepared["questions"]
+    assert prepared["cover_letter"] and name["suggested"] == content["name"]
+    assert linkedin["suggested"] == content["contact"]["links"][0]
+    assert authorized["suggested"] == "Yes" and sponsor["suggested"] == "No"
+    assert us["suggested"] == mixed["suggested"] == generic["suggested"] == ""
+    assert outside["manual"] and not outside["draftable"]
+    assert not followup["draftable"]
+    metadata["location"]["name"] = "Florida, United States; Toronto, Ontario, Canada"
+    mixed_view = client.get(route + "/screening", params={"resume_id": selected["id"]}).raise_for_status().json()
+    assert mixed_view["questions"][2]["suggested"] == mixed_view["questions"][3]["suggested"] == ""
+    metadata["location"]["name"] = "Toronto, Ontario, Canada"
+    assert clearance["suggested"] == "" and clearance["options"] == ["Secret", "No clearance / Ineligible"]
+    assert why["draftable"] and not fit["draftable"] and not clearance["draftable"]
+    approval = {"preview": setup["preview"], "resume_id": selected["id"], "screening_answers": {clearance["key"]: "Maybe"}}
+    assert client.post(route, json=approval).status_code == 409
+    approval["screening_answers"] = {clearance["key"]: "Secret", linkedin["key"]: ""}
+    browser.mode = "pause"
+    browser.release.set()
+    client.post(route, json=approval).raise_for_status()
+    _wait(client, route, "needs_you")
+    assert browser.calls[0][3] == approval["screening_answers"]
+
+    approval["screening_answers"] = {clearance["key"]: "No clearance / Ineligible"}
+    browser.mode = "confirm"
+    client.post(route, json=approval).raise_for_status()
+    _wait(client, route, "confirmed")
+    assert browser.calls[1][3] == approval["screening_answers"]
 
 
 def test_only_direct_posting_hosts_and_stable_ids_are_accepted():

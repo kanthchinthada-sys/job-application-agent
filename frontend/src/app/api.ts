@@ -6,7 +6,7 @@ import {
   AIMatchReport, AiSettings, AiStatus, Application, BankImportReport, BankRecord, RecordStatus, BoardSearch, Doc, ExtractedSkills, Handoff, Health, ImportedJob, Job, MatchReport,
   NewJob, QuickAdd, ResumeImport, CountryOption, SearchResult, FoundJob, ApplyResult, ApifyRun, ApifySettings, Preparation, Me, Requirements,
   Activity, IntakeStatus, GapSuggestion, SearchFilters, SearchPreset, InterviewPrep, SectionEdit, SectionReview, BenchmarkResult,
-  TechnicalCoverage, EvidencePreview, ResumePdfCheck, AutoApplySetup, AutoApplyRun, AutoApplyApproval } from './models';
+  TechnicalCoverage, EvidencePreview, ResumePdfCheck, AutoApplySetup, AutoApplyRun, AutoApplyApproval, AutoApplyScreening } from './models';
 
 /** An error from the backend, with its readable message (FastAPI's "detail"). */
 export class ApiError extends Error {
@@ -59,7 +59,7 @@ export class Api {
   match(id: number) { return this.call(this.http.get<MatchReport>(`/jobs/${id}/match`)); }
   aiMatch(id: number) { return this.call(this.http.post<AIMatchReport>(`/jobs/${id}/match/ai`, {})); }
   createJob(body: NewJob) { return this.call(this.http.post<Job>('/jobs', body)); }
-  quickAddJob(body: { url: string | null; description: string | null; allow_duplicate?: boolean; company?: string }) {
+  quickAddJob(body: { url: string | null; description: string | null; allow_duplicate?: boolean; company?: string; title?: string }) {
     return this.call(this.http.post<QuickAdd>('/jobs/quick', body));
   }
   jobIntake(id: number) { return this.call(this.http.get<IntakeStatus>(`/jobs/${id}/intake`)); }
@@ -133,8 +133,13 @@ export class Api {
   approvePlan(appId: number, answers: Record<string, string>) {
     return this.call(this.http.post<Doc>(`/applications/${appId}/submission/approve`, { answers }));
   }
-  autoApplySetup(appId: number) {
-    return this.call(this.http.get<AutoApplySetup>(`/applications/${appId}/auto-apply`));
+  autoApplySetup(appId: number, resumeId?: number | null) {
+    return this.call(this.http.get<AutoApplySetup>(`/applications/${appId}/auto-apply`,
+      resumeId ? { params: { resume_id: resumeId } } : {}));
+  }
+  autoApplyScreening(appId: number, resumeId?: number | null) {
+    return this.call(this.http.get<AutoApplyScreening>(`/applications/${appId}/auto-apply/screening`,
+      resumeId ? { params: { resume_id: resumeId } } : {}));
   }
   setAutoApplyPortal(appId: number, url: string) {
     return this.call(this.http.put<AutoApplySetup>(`/applications/${appId}/auto-apply/portal`, { url }));
@@ -168,17 +173,20 @@ export class Api {
     const params: Record<string, string> = jobId === undefined ? {} : { job_id: String(jobId) };
     return this.call(this.http.get<GapSuggestion[]>('/experience-gaps', { params }));
   }
-  draftGap(id: number, again = false) {
+  draftGap(id: number, again = false, owner?: string) {
+    const params: Record<string, string> = {};
+    if (again) params['again'] = 'true';
+    if (owner) params['owner'] = owner;
     return this.call(this.http.post<GapSuggestion>(`/experience-gaps/${id}/draft`, {},
-      { params: again ? { again: 'true' } : {} }));
+      { params }));
   }
   confirmGap(id: number, owner: string, text: string) {
     return this.call(this.http.post<{ record_id: string; application_id: number; preparation: Preparation }>(
       `/experience-gaps/${id}/confirm`, { owner, text, confirmed: true }));
   }
   confirmGaps(items: { id: number; owner: string; text: string }[]) {
-    return this.call(this.http.post<{ record_ids: string[]; application_ids: number[]; preparations: Preparation[] }>(
-      '/experience-gaps/confirm', { items, confirmed: true }));
+    return this.call(this.http.post<{ record_ids: string[]; application_ids: number[]; preparations: Preparation[];
+      rejected: Record<number, string> }>('/experience-gaps/confirm', { items, confirmed: true, report_errors: true }));
   }
   dismissGap(id: number) { return this.call(this.http.delete(`/experience-gaps/${id}`)); }
   savedSearches() { return this.call(this.http.get<SearchPreset[]>('/search/saved')); }

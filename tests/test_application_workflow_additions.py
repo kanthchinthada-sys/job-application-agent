@@ -4,6 +4,8 @@ from app import job_search
 
 
 def test_technical_gap_review_creates_an_append_only_resume(client, profile_data, make_job, fake_llm):
+    import json
+
     client.put("/profile", json=profile_data).raise_for_status()
     job = make_job(title="SDET", description="Required qualifications:\n- Hands-on experience with Cypress\n"
                    "- Excellent communication skills\n- A bachelor's degree",
@@ -32,8 +34,10 @@ def test_technical_gap_review_creates_an_append_only_resume(client, profile_data
     resumes = [d for d in docs if d["kind"] == "resume"]
     assert [d["version"] for d in resumes] == [2, 1]
     assert resumes[1]["id"] == base.json()["id"]
-    assert "cypress" in resumes[0]["content"].lower()
-    assert [r for r in client.get("/profile").json()["experience_bank"] if r["id"] == approved.json()["record_id"]
+    record_id = approved.json()["record_id"]
+    role = next(r for r in json.loads(resumes[0]["content"])["experience"] if r["company"] == owner)
+    assert any(b["source_id"] == record_id and b["text"] == body["text"] for b in role["bullets"])
+    assert [r for r in client.get("/profile").json()["experience_bank"] if r["id"] == record_id
             ][0]["status"] == "verified"
     assert client.post(url, json=body).json()["record_id"] == approved.json()["record_id"]
     client.app.state.preparer.wait()
